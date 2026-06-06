@@ -1,0 +1,11 @@
+# build
+build/
+cmake-build/
+
+# executables
+bin/
+cugemv
+
+# ide
+.vscode/
+.idea/
