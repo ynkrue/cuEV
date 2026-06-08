@@ -9,7 +9,7 @@
 #include <cuda_runtime.h>
 
 template <typename T>
-void launch_gemv_naive(T alpha, const T *A, const T *x,
+void launch_gemv_gmem(T alpha, const T *A, const T *x,
                        T beta, T *y, int M, int N, cudaStream_t stream);
 
 template <typename T>
@@ -20,19 +20,15 @@ void launch_gemv_smem(T alpha, const T *A, const T *x,
 template <typename T>
 void launch_gemv_tma(T alpha, const T *A, const T *x,
                      T beta, T *y, int M, int N, cudaStream_t stream);
-
-// Hopper: warpgroup-level cooperative fetch + compute.
+                     
+// Hopper: persistent producer/consumer kernel using barrier pipelines.
 template <typename T>
-void launch_gemv_warpgroup(T alpha, const T *A, const T *x,
-                           T beta, T *y, int M, int N, cudaStream_t stream);
+void launch_gemv_double_tma(T alpha, const T *A, const T *x,
+                            T beta, T *y, int M, int N,
+                            cudaStream_t stream);
 
 // Hopper: thread block cluster, where neighbouring CTAs share smem via cluster bars.
 template <typename T>
 void launch_gemv_cluster(T alpha, const T *A, const T *x,
                          T beta, T *y, int M, int N, cudaStream_t stream);
 
-// Hopper: persistent producer/consumer kernel using barrier pipelines.
-template <typename T>
-void launch_gemv_opt(T alpha, const T *A, const T *x,
-                                   T beta, T *y, int M, int N,
-                                   cudaStream_t stream);

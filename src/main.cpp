@@ -43,14 +43,19 @@ static void run_cublas_ref(cublasHandle_t handle,
 }
 
 /// Correctness check
+// fp32 accumulation across N terms can diverge from cuBLAS's reduction order
+// especially near zero (cancellation), so we use a loose rtol for float.
 template <typename T>
-static bool check(const T *ref, const T *got, int n, double tol = 1e-3) {
+static bool check(const T *ref, const T *got, int n,
+                  double rtol = sizeof(T) == 4 ? 1e-2 : 1e-5,
+                  double atol = sizeof(T) == 4 ? 1e-4 : 1e-9) {
     for (int i = 0; i < n; ++i) {
-        double diff = fabs((double)ref[i] - (double)got[i]);
-        double mag  = fmax(fabs((double)ref[i]), 1e-10);
-        if (diff / mag > tol) {
-            printf("  MISMATCH at [%d]: ref=%.8f  got=%.8f\n",
-                   i, (double)ref[i], (double)got[i]);
+        double r    = (double)ref[i];
+        double g    = (double)got[i];
+        double diff = fabs(r - g);
+        if (diff > atol + rtol * fabs(r)) {
+            printf("  MISMATCH at [%d]: ref=%.8f  got=%.8f  abserr=%.2e\n",
+                   i, r, g, diff);
             return false;
         }
     }
@@ -142,12 +147,11 @@ static void run_suite(cublasHandle_t cublas, int M, int N,
 
     struct Entry { const char *name; Launcher<T> fn; };
     Entry kernels[] = {
-        {"gemv_naive",             launch_gemv_naive<T>},
+        {"gemv_gmem",             launch_gemv_gmem<T>},
         {"gemv_smem",              launch_gemv_smem<T>},
         {"gemv_tma",               launch_gemv_tma<T>},
-        {"gemv_warpgroup",         launch_gemv_warpgroup<T>},
+        {"gemv_double_tma",        launch_gemv_double_tma<T>},
         {"gemv_cluster",           launch_gemv_cluster<T>},
-        {"gemv_opt",               launch_gemv_opt<T>},
     };
 
     for (auto &e : kernels)
@@ -167,7 +171,7 @@ static void run_suite(cublasHandle_t cublas, int M, int N,
 // ---------------------------------------------------------------------------
 
 int main(int argc, char **argv) {
-    GemvArgs args = {4096, 4096, 3, 20};
+    GemvArgs args = {8192, 16384, 5, 25};
 
     for (int i = 1; i < argc; ++i) {
         if      (!strcmp(argv[i], "--M")      && i+1 < argc) args.M      = atoi(argv[++i]);

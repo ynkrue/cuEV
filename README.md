@@ -43,9 +43,9 @@ cuGEMV/
 
 | Name | Technique |
 |---|---|
-| `gemv_naive` | one thread per row |
+| `gemv_gmem` | one thread per row |
 | `gemv_smem` | shared memory tiling + block reduce |
 | `gemv_tma` | Hopper TMA bulk async copy |
 | `gemv_warpgroup` | 128-thread warpgroup cooperative fetch |
 | `gemv_cluster` | thread block cluster + distributed shared memory |
-| `gemv_opt` | TMA producer / async-barrier consumer pipeline |
+| `gemv_double_tma` | TMA producer / async-barrier consumer pipeline |
