@@ -23,9 +23,13 @@
         }                                                                      \
     } while (0)
 
-struct GemvArgs {
-    int M;          // rows
-    int N;          // cols
+struct BenchArgs {
+    int M;
+    int N;
     int warmup;
     int iters;
 };
+
+int inline div_up(int a, int b) {
+    return (a + b - 1) / b;
+}
