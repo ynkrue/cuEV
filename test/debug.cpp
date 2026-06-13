@@ -1,29 +1,34 @@
+/**
+ * @file   debug.cpp
+ * @brief  Eigensolver smoke test — run solve<double> on a small known matrix.
+ *
+ * Build:  make debug
+ * Run:    ./build/cuDebug
+ *
+ * @author  Yannik Rüfenacht
+ * @date    2026-06
+ */
+
 #include "common.h"
 #include "kernels.cuh"
-#include <cuda_runtime.h>
-#include <cstdio>
-#include <cstring>
+#include <iostream>
+#include <iomanip>
 #include <vector>
 
-// forward-declare the solver (defined in solver.cu)
-template <typename T>
-void solve(T *H, int n, T *eval, T *evec, cudaStream_t stream);
-
-static void print_matrix(const char *name, const double *M, int rows, int cols) {
-    printf("%s:\n", name);
+static void print_matrix(const char *label, const double *h, int rows, int cols) {
+    std::cout << label << ":\n";
     for (int i = 0; i < rows; ++i) {
-        printf("  [");
-        for (int j = 0; j < cols; ++j)
-            printf(" %8.4f", M[i * cols + j]);
-        printf(" ]\n");
+        std::cout << "  [";
+        for (int j = 0; j < cols; ++j) {
+            std::cout << std::setw(9) << std::fixed << std::setprecision(4) << h[i * cols + j];
+        }
+        std::cout << " ]\n";
     }
-    printf("\n");
+    std::cout << "\n";
 }
 
 int main() {
-    // A is symmetric — eigenvalues are real
-    // Row-major, 4×4
-    const int N = 4;
+    constexpr int N = 4;
     double hA[] = {
          4,  1, -2,  2,
          1,  2,  0,  1,
@@ -41,16 +46,18 @@ int main() {
     cudaStream_t stream;
     CUDA_CHECK(cudaStreamCreate(&stream));
 
-    solve<double>(dA, N, d_eval, d_evec, stream);
+    cuev::solve<double>(dA, N, d_eval, d_evec, stream);
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    std::vector<double> h_eval(N), h_evec(N * N), h_A_out(N * N);
+    std::vector<double> h_eval(N), h_evec(N * N);
     CUDA_CHECK(cudaMemcpy(h_eval.data(), d_eval, N     * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(h_evec.data(), d_evec, N * N * sizeof(double), cudaMemcpyDeviceToHost));
 
-    printf("eigenvalues:\n  [");
-    for (int i = 0; i < N; ++i) printf(" %8.4f", h_eval[i]);
-    printf(" ]\n\n");
+    std::cout << "eigenvalues:\n  [";
+    for (int i = 0; i < N; ++i) {
+        std::cout << std::setw(9) << std::fixed << std::setprecision(4) << h_eval[i];
+    }
+    std::cout << " ]\n\n";
 
     print_matrix("eigenvectors (rows)", h_evec.data(), N, N);
 

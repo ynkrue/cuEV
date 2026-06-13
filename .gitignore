@@ -9,3 +9,7 @@ cugemv
 # ide
 .vscode/
 .idea/
+
+# claude
+.claude/
+CLAUDE.md

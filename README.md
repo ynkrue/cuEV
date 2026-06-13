@@ -1,51 +1,81 @@
-# cuGEMV
+# cuEV — CUDA Eigensolver
 
-Sandbox for developing and benchmarking GEMV kernels on Hopper (H100/H200, sm_90a), with a focus on advanced CUDA techniques: TMA, warp groups, thread block clusters, and async producer-consumer pipelines.
+Custom CUDA implementation of a real symmetric dense eigensolver: `A v = λv`.
 
-All kernels implement `y = α·A·x + β·y` (row-major, fp32 and fp64). cuBLAS `sgemv`/`dgemv` serves as the correctness reference and performance baseline.
+Public entry point:
+```cpp
+cuev::solve<T>(T *H, int n, T *eval, T *evec, cudaStream_t stream);
+```
+`H` is an n×n real symmetric matrix (row-major, device pointer). On return, `eval` holds eigenvalues in ascending order and `evec` holds the corresponding eigenvectors as rows.
+
+## Algorithm
+
+```
+solve<T>
+├── tridiag_hh        H → T       Householder tridiagonalization (n−1 steps)
+├── tridiag_eig       T → Λ, Qᵀ  divide-and-conquer STEDC
+└── tridiag_hh_back   evec = Q·Qᵀ apply stored Householder projections
+```
+
+Each Householder step k reduces column k of the trailing submatrix and stores the reflection vector implicitly in the zeroed-out lower triangle of H. The accumulated product Q = P₀·P₁···P_{n-3} is only materialized during the back-transformation.
+
+The D&C split: `T = diag(T₁, T₂) + β·vvᵀ`, solve halves recursively, merge via the rank-1 secular equation `1 + ρ·Σ zᵢ²/(dᵢ−λ) = 0`.
+
+## Roadmap
+
+| Phase | Goal | Status |
+|---|---|---|
+| 1 | Custom kernels — everything from scratch | **in progress** |
+| 2 | cuBLAS / cuSOLVER-backed reference implementations | planned |
+| 3 | Distributed (cuBLASMp, NCCL) | planned |
+
+Phase 1 is the learning and research phase. Phase 2 adds library-backed implementations of each operation as correctness references and performance baselines. Phase 3 extends to multi-GPU.
 
 ## Build
 
-Requires CUDA 12+ and a Hopper GPU (sm_90a).
-
 ```bash
-make          # release build → build/cugemv
+make            # build shared library → build/libcuev.so
+make bench      # build benchmark binary → build/cuBench
+make debug      # build debug binary → build/cuDebug  (-DDEBUG)
 make clean
 ```
 
-Override the CUDA installation path if needed:
-
+Override architecture or CUDA path:
 ```bash
+make ARCH=sm_90a
 make CUDA_HOME=/path/to/cuda
 ```
 
-## Run
+Default target is `sm_80` (A100). Primary development target is `sm_90a` (H100/H200).
 
-```bash
-./build/cugemv [--M 4096] [--N 4096] [--warmup 3] [--iters 20]
-```
+## Binaries
+
+| Binary | Source | Purpose |
+|---|---|---|
+| `cuBench` | `bench/bench.cpp` | Benchmark GEMV / GEMM / transpose vs cuBLAS |
+| `cuDebug` | `test/debug.cpp` | Run `solve<double>` on a small matrix, print eigenvalues and eigenvectors |
 
 ## File structure
 
 ```
-cuGEMV/
+cuEV/
 ├── Makefile
+├── Doxyfile
 ├── include/
-│   └── common.h              CUDA_CHECK / CUBLAS_CHECK macros, GemvArgs
+│   ├── common.h            CUDA_CHECK / CUBLAS_CHECK / div_up / BenchArgs / debug helpers
+│   └── kernels.cuh         all kernel declarations — single interface file
 └── src/
-    ├── main.cpp              benchmark harness (timing, correctness)
-    └── cuda/
-        ├── kernels.cuh       launcher declarations
-        └── kernels.cu        gemv kernels
+    └── custom/             Phase 1 — custom kernels
+        ├── util.cu         fill, copy, transpose
+        ├── gemv.cu         gemv_{gmem,smem}
+        ├── gemm.cu         gemm_{gmem,smem,tiled,warptile}
+        ├── householder.cu  hh_{reflect,trail_matvec,ortho,update,wy_build,wy_apply}
+        ├── tridiag.cu      eig_{leaf,split,merge}
+        └── solver.cu       solve<T> + tridiag_{hh,eig,hh_back}
 ```
 
-## Kernels
+## Documentation
 
-| Name | Technique |
-|---|---|
-| `gemv_gmem` | one thread per row |
-| `gemv_smem` | shared memory tiling + block reduce |
-| `gemv_tma` | Hopper TMA bulk async copy |
-| `gemv_warpgroup` | 128-thread warpgroup cooperative fetch |
-| `gemv_cluster` | thread block cluster + distributed shared memory |
-| `gemv_double_tma` | TMA producer / async-barrier consumer pipeline |
+```bash
+doxygen Doxyfile    # output → docs/html/index.html
+```
