@@ -19,7 +19,8 @@
 #pragma once
 #include <cuda_runtime.h>
 
-namespace cuev::kernels {
+namespace cuev {
+namespace kernels {
 
 // =============================================================================
 // Utility
@@ -34,8 +35,7 @@ namespace cuev::kernels {
  * @param[in]     N      number of elements
  * @param[in]     stream CUDA stream
  */
-template <typename T>
-void fill(T alpha, T *x, int N, cudaStream_t stream);
+template <typename T> void fill(T alpha, T *x, int N, cudaStream_t stream);
 
 /**
  * @brief Copy a vector: y ← x.
@@ -46,8 +46,7 @@ void fill(T alpha, T *x, int N, cudaStream_t stream);
  * @param[in]     N      number of elements
  * @param[in]     stream CUDA stream
  */
-template <typename T>
-void copy(const T *x, T *y, int N, cudaStream_t stream);
+template <typename T> void copy(const T *x, T *y, int N, cudaStream_t stream);
 
 /**
  * @brief Transpose a matrix: Aᵀ ← A.
@@ -59,9 +58,7 @@ void copy(const T *x, T *y, int N, cudaStream_t stream);
  * @param[in]     N      number of columns of A
  * @param[in]     stream CUDA stream
  */
-template <typename T>
-void transpose(const T *A, T *AT, int M, int N, cudaStream_t stream);
-
+template <typename T> void transpose(const T *A, T *AT, int M, int N, cudaStream_t stream);
 
 // =============================================================================
 // GEMV  —  y ← αAx + βy
@@ -83,21 +80,17 @@ void transpose(const T *A, T *AT, int M, int N, cudaStream_t stream);
  * @param[in]     stream CUDA stream
  */
 template <typename T>
-inline void gemv(T alpha, const T *A, const T *x,
-                 T beta, T *y, int M, int N, cudaStream_t stream) {
+inline void gemv(T alpha, const T *A, const T *x, T beta, T *y, int M, int N, cudaStream_t stream) {
     gemv_gmem(alpha, A, x, beta, y, M, N, stream);
 }
 
 /// gmem variant — one thread per output element
 template <typename T>
-void gemv_gmem(T alpha, const T *A, const T *x,
-               T beta, T *y, int M, int N, cudaStream_t stream);
+void gemv_gmem(T alpha, const T *A, const T *x, T beta, T *y, int M, int N, cudaStream_t stream);
 
 /// smem variant — one block per row, shared-memory reduction
 template <typename T>
-void gemv_smem(T alpha, const T *A, const T *x,
-               T beta, T *y, int M, int N, cudaStream_t stream);
-
+void gemv_smem(T alpha, const T *A, const T *x, T beta, T *y, int M, int N, cudaStream_t stream);
 
 // =============================================================================
 // GEMM  —  C ← αAB + βC
@@ -120,31 +113,30 @@ void gemv_smem(T alpha, const T *A, const T *x,
  * @param[in]     stream CUDA stream
  */
 template <typename T>
-inline void gemm(T alpha, const T *A, const T *B,
-                 T beta, T *C, int M, int N, int K, cudaStream_t stream) {
+inline void
+gemm(T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K, cudaStream_t stream) {
     gemm_warptile(alpha, A, B, beta, C, M, N, K, stream);
 }
 
 /// gmem variant — one thread per output element
 template <typename T>
-void gemm_gmem(T alpha, const T *A, const T *B,
-               T beta, T *C, int M, int N, int K, cudaStream_t stream);
+void gemm_gmem(
+    T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K, cudaStream_t stream);
 
 /// smem variant — shared-memory tiled, one block per output tile
 template <typename T>
-void gemm_smem(T alpha, const T *A, const T *B,
-               T beta, T *C, int M, int N, int K, cudaStream_t stream);
+void gemm_smem(
+    T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K, cudaStream_t stream);
 
 /// register-tiled variant — each thread accumulates a TM×TN output tile
 template <typename T>
-void gemm_tiled(T alpha, const T *A, const T *B,
-                T beta, T *C, int M, int N, int K, cudaStream_t stream);
+void gemm_tiled(
+    T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K, cudaStream_t stream);
 
 /// warp-tiled variant — 128-bit vectorized loads, sA transposed in smem for coalesced reads
 template <typename T>
-void gemm_warptile(T alpha, const T *A, const T *B,
-                   T beta, T *C, int M, int N, int K, cudaStream_t stream);
-
+void gemm_warptile(
+    T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K, cudaStream_t stream);
 
 // =============================================================================
 // Householder transforms
@@ -248,7 +240,6 @@ void hh_hh_wy_build(const T *V, const T *tau, T *Tf, int M, int K, cudaStream_t 
 template <typename T>
 void hh_hh_wy_apply(const T *V, const T *Tf, T *C, int M, int N, int K, cudaStream_t stream);
 
-
 // =============================================================================
 // Eigensolver primitives
 // =============================================================================
@@ -267,8 +258,7 @@ void hh_hh_wy_apply(const T *V, const T *Tf, T *C, int M, int N, int K, cudaStre
  * @param[out]    QT     2×2 eigenvector matrix, row-major
  * @param[in]     stream CUDA stream
  */
-template <typename T>
-void eig_leaf(const T *d, const T *e, T *eval, T *QT, cudaStream_t stream);
+template <typename T> void eig_leaf(const T *d, const T *e, T *eval, T *QT, cudaStream_t stream);
 
 /**
  * @brief Split a symmetric tridiagonal into two decoupled halves.
@@ -288,8 +278,8 @@ void eig_leaf(const T *d, const T *e, T *eval, T *QT, cudaStream_t stream);
 template <typename T>
 void eig_split(const T *d, const T *e, int k, T *d1, T *d2, cudaStream_t stream);
 
-} // namespace cuev::kernels
-
+} // namespace kernels
+} // namespace cuev
 
 // =============================================================================
 // Public Solver API
@@ -310,7 +300,6 @@ namespace cuev {
  * @param[out]    evec   eigenvectors as rows, n×n row-major
  * @param[in]     stream CUDA stream
  */
-template <typename T>
-void solve(T *H, int n, T *eval, T *evec, cudaStream_t stream);
+template <typename T> void solve(T *H, int n, T *eval, T *evec, cudaStream_t stream);
 
 } // namespace cuev

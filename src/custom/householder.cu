@@ -45,7 +45,9 @@ __global__ void hh_reflect_kernel(T *H, T *v, T *tau, T *d, T *e, int N, int k) 
     __syncthreads();
 
     for (int s = blockDim.x >> 1; s >= 32; s >>= 1) {
-        if (tid < s) { snrm[tid] += snrm[tid + s]; }
+        if (tid < s) {
+            snrm[tid] += snrm[tid + s];
+        }
         __syncthreads();
     }
 
@@ -57,14 +59,16 @@ __global__ void hh_reflect_kernel(T *H, T *v, T *tau, T *d, T *e, int N, int k) 
         val += __shfl_down_sync(0xffffffff, val, 2);
         val += __shfl_down_sync(0xffffffff, val, 1);
         if (tid == 0) {
-            T norm  = sqrt(val);
-            T x0    = H[(k + 1) * N + k];
-            T alpha = -copysign(norm, x0);  // α = −sign(x₀)‖x‖, ensures numerical stability
-            T vTv   = norm * norm - alpha * x0;
-            v[0]               = x0 - alpha;
+            T norm = sqrt(val);
+            T x0 = H[(k + 1) * N + k];
+            T alpha = -copysign(norm, x0); // α = −sign(x₀)‖x‖, ensures numerical stability
+            T vTv = norm * norm - alpha * x0;
+            v[0] = x0 - alpha;
             H[(k + 1) * N + k] = x0 - alpha;
             tau[k] = (vTv == T(0)) ? T(0) : T(1) / vTv;
-            if (k < N - 1) { e[k] = alpha; }
+            if (k < N - 1) {
+                e[k] = alpha;
+            }
             d[k] = H[k * N + k];
         }
         // __syncthreads() omitted — tid >= 32 do not participate; kernel returns immediately after
@@ -89,7 +93,9 @@ __global__ void hh_trail_matvec_kernel(const T *v, const T *H, T *p, int N, int 
     __syncthreads();
 
     for (int s = BLOCKSIZE >> 1; s >= 32; s >>= 1) {
-        if (tid < s) { sr[tid] += sr[tid + s]; }
+        if (tid < s) {
+            sr[tid] += sr[tid + s];
+        }
         __syncthreads();
     }
     if (tid < 32) {
@@ -99,7 +105,9 @@ __global__ void hh_trail_matvec_kernel(const T *v, const T *H, T *p, int N, int 
         val += __shfl_down_sync(0xffffffff, val, 4);
         val += __shfl_down_sync(0xffffffff, val, 2);
         val += __shfl_down_sync(0xffffffff, val, 1);
-        if (tid == 0) { p[row - k - 1] = val; }
+        if (tid == 0) {
+            p[row - k - 1] = val;
+        }
     }
 }
 
@@ -120,7 +128,9 @@ __global__ void hh_ortho_kernel(const T *v, const T *p, const T *tau, T *u, int 
     __syncthreads();
 
     for (int s = BLOCKSIZE >> 1; s >= 32; s >>= 1) {
-        if (tid < s) { svTp[tid] += svTp[tid + s]; }
+        if (tid < s) {
+            svTp[tid] += svTp[tid + s];
+        }
         __syncthreads();
     }
     if (tid < 32) {
@@ -130,7 +140,9 @@ __global__ void hh_ortho_kernel(const T *v, const T *p, const T *tau, T *u, int 
         val += __shfl_down_sync(0xffffffff, val, 4);
         val += __shfl_down_sync(0xffffffff, val, 2);
         val += __shfl_down_sync(0xffffffff, val, 1);
-        if (tid == 0) { svTp[0] = val; }
+        if (tid == 0) {
+            svTp[0] = val;
+        }
     }
     __syncthreads();
 
@@ -145,11 +157,11 @@ __global__ void hh_ortho_kernel(const T *v, const T *p, const T *tau, T *u, int 
 // -----------------------------------------------------------------------------
 template <typename T, int BLOCKSIZE>
 __global__ void hh_ortho_kernel(const T *v, const T *u, T *H, int N, int k) {
-    int m     = N - k - 1;
+    int m = N - k - 1;
     int t_row = threadIdx.x / BLOCKSIZE;
     int t_col = threadIdx.x % BLOCKSIZE;
-    int row   = blockIdx.y * BLOCKSIZE + t_row;
-    int col   = blockIdx.x * BLOCKSIZE + t_col;
+    int row = blockIdx.y * BLOCKSIZE + t_row;
+    int col = blockIdx.x * BLOCKSIZE + t_col;
 
     // each tile loads its v/u slices into smem to avoid redundant global reads
     __shared__ T sv_row[BLOCKSIZE], su_row[BLOCKSIZE];
@@ -166,8 +178,8 @@ __global__ void hh_ortho_kernel(const T *v, const T *u, T *H, int N, int k) {
     __syncthreads();
 
     if (row < m && col < m) {
-        H[(k + 1 + row) * N + (k + 1 + col)] -= sv_row[t_row] * su_col[t_col]
-                                               + su_row[t_row] * sv_col[t_col];
+        H[(k + 1 + row) * N + (k + 1 + col)] -=
+            sv_row[t_row] * su_col[t_col] + su_row[t_row] * sv_col[t_col];
     }
 }
 
@@ -187,7 +199,8 @@ __global__ void hh_wy_apply_kernel(const T *V, const T *Tf, T *C, int M, int N, 
 // =============================================================================
 // Host launchers
 // =============================================================================
-namespace cuev::kernels {
+namespace cuev {
+namespace kernels {
 
 template <typename T>
 void hh_reflect(T *H, T *v, T *tau, T *d, T *e, int N, int k, cudaStream_t stream) {
@@ -212,8 +225,9 @@ void hh_update(const T *v, const T *u, T *H, int N, int k, cudaStream_t stream) 
     constexpr int BLOCKSIZE = 32;
     hh_ortho_kernel<T, BLOCKSIZE>
         <<<dim3(div_up(N - k - 1, BLOCKSIZE), div_up(N - k - 1, BLOCKSIZE)),
-           BLOCKSIZE * BLOCKSIZE, 0, stream>>>
-        (v, u, H, N, k);
+           BLOCKSIZE * BLOCKSIZE,
+           0,
+           stream>>>(v, u, H, N, k);
 }
 
 template <typename T>
@@ -231,16 +245,17 @@ void hh_hh_wy_apply(const T *V, const T *Tf, T *C, int M, int N, int K, cudaStre
 // =============================================================================
 // Explicit instantiations
 // =============================================================================
-#define INSTANTIATE(T)                                                                      \
-    template void hh_reflect<T>(T *, T *, T *, T *, T *, int, int, cudaStream_t);         \
-    template void hh_trail_matvec<T>   (const T *, const T *, T *, int, int, cudaStream_t);       \
-    template void hh_ortho<T> (const T *, const T *, const T *, T *, int, int, cudaStream_t); \
-    template void hh_update<T>   (const T *, const T *, T *, int, int, cudaStream_t);       \
-    template void hh_hh_wy_build<T>  (const T *, const T *, T *, int, int, cudaStream_t);       \
-    template void hh_hh_wy_apply<T>  (const T *, const T *, T *, int, int, int, cudaStream_t);
+#define INSTANTIATE(T)                                                                             \
+    template void hh_reflect<T>(T *, T *, T *, T *, T *, int, int, cudaStream_t);                  \
+    template void hh_trail_matvec<T>(const T *, const T *, T *, int, int, cudaStream_t);           \
+    template void hh_ortho<T>(const T *, const T *, const T *, T *, int, int, cudaStream_t);       \
+    template void hh_update<T>(const T *, const T *, T *, int, int, cudaStream_t);                 \
+    template void hh_hh_wy_build<T>(const T *, const T *, T *, int, int, cudaStream_t);            \
+    template void hh_hh_wy_apply<T>(const T *, const T *, T *, int, int, int, cudaStream_t);
 
 INSTANTIATE(float)
 INSTANTIATE(double)
 #undef INSTANTIATE
 
-} // namespace cuev::kernels
+} // namespace kernels
+} // namespace cuev

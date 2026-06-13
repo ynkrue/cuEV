@@ -11,8 +11,8 @@
 
 #include "common.h"
 #include "kernels.cuh"
-#include <iostream>
 #include <iomanip>
+#include <iostream>
 #include <vector>
 
 static void print_matrix(const char *label, const double *h, int rows, int cols) {
@@ -30,16 +30,28 @@ static void print_matrix(const char *label, const double *h, int rows, int cols)
 int main() {
     constexpr int N = 4;
     double hA[] = {
-         4,  1, -2,  2,
-         1,  2,  0,  1,
-        -2,  0,  3, -2,
-         2,  1, -2, -1,
+        4,
+        1,
+        -2,
+        2,
+        1,
+        2,
+        0,
+        1,
+        -2,
+        0,
+        3,
+        -2,
+        2,
+        1,
+        -2,
+        -1,
     };
     print_matrix("A (input)", hA, N, N);
 
     double *dA, *d_eval, *d_evec;
-    CUDA_CHECK(cudaMalloc(&dA,     N * N * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_eval, N     * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&dA, N * N * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_eval, N * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_evec, N * N * sizeof(double)));
     CUDA_CHECK(cudaMemcpy(dA, hA, N * N * sizeof(double), cudaMemcpyHostToDevice));
 
@@ -50,7 +62,7 @@ int main() {
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
     std::vector<double> h_eval(N), h_evec(N * N);
-    CUDA_CHECK(cudaMemcpy(h_eval.data(), d_eval, N     * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_eval.data(), d_eval, N * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(h_evec.data(), d_evec, N * N * sizeof(double), cudaMemcpyDeviceToHost));
 
     std::cout << "eigenvalues:\n  [";

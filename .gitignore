@@ -10,6 +10,13 @@ cugemv
 .vscode/
 .idea/
 
+# docs (generated)
+docs/html/
+docs/doxygen-warnings.log
+
+# pre-commit cache
+.cache/
+
 # claude
 .claude/
 CLAUDE.md

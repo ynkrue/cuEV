@@ -20,29 +20,39 @@
 // =============================================================================
 // Host launchers
 // =============================================================================
-namespace cuev::kernels {
+namespace cuev {
+namespace kernels {
 
-template <typename T>
-void eig_leaf(const T *d, const T *e, T *eval, T *QT, cudaStream_t stream) {
+template <typename T> void eig_leaf(const T *d, const T *e, T *eval, T *QT, cudaStream_t stream) {
     // stub — closed-form 2×2 symmetric tridiagonal eigensolver not yet implemented
-    (void)d; (void)e; (void)eval; (void)QT; (void)stream;
+    (void)d;
+    (void)e;
+    (void)eval;
+    (void)QT;
+    (void)stream;
 }
 
 template <typename T>
 void eig_split(const T *d, const T *e, int k, T *d1, T *d2, cudaStream_t stream) {
     // stub — tridiagonal split with rank-1 correction not yet implemented
-    (void)d; (void)e; (void)k; (void)d1; (void)d2; (void)stream;
+    (void)d;
+    (void)e;
+    (void)k;
+    (void)d1;
+    (void)d2;
+    (void)stream;
 }
 
 // =============================================================================
 // Explicit instantiations
 // =============================================================================
-#define INSTANTIATE(T) \
-    template void eig_leaf <T>(const T *, const T *, T *, T *, cudaStream_t);       \
+#define INSTANTIATE(T)                                                                             \
+    template void eig_leaf<T>(const T *, const T *, T *, T *, cudaStream_t);                       \
     template void eig_split<T>(const T *, const T *, int, T *, T *, cudaStream_t);
 
 INSTANTIATE(float)
 INSTANTIATE(double)
 #undef INSTANTIATE
 
-} // namespace cuev::kernels
+} // namespace kernels
+} // namespace cuev

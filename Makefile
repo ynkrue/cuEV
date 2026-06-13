@@ -40,7 +40,7 @@ TEST_OBJS   := $(TEST_SRCS:%.cpp=$(BUILD_DIR)/%.o)
 # ============================================================
 # Targets
 # ============================================================
-.PHONY: all bench debug clean
+.PHONY: all bench debug clean docs format
 
 all: $(LIB)
 
@@ -79,3 +79,9 @@ $(BUILD_DIR) $(BUILD_DIR)/custom $(BUILD_DIR)/bench $(BUILD_DIR)/test:
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+docs:
+	doxygen Doxyfile
+
+format:
+	find include src bench test -name '*.cu' -o -name '*.cuh' -o -name '*.cpp' -o -name '*.h' | xargs clang-format -i
