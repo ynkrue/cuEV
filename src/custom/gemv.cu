@@ -15,7 +15,7 @@
 #include <cuda.h>
 
 // =============================================================================
-// Device kernels (translation-unit private)
+// Device kernels
 // =============================================================================
 namespace {
 
@@ -41,25 +41,9 @@ __global__ void gemv_smem_kernel(T alpha, const T *A, const T *x, T beta, T *y, 
     for (int j = tid; j < N; j += BLOCKSIZE) {
         acc += A[row * N + j] * x[j];
     }
-    sr[tid] = acc;
-    __syncthreads();
-
-    for (int s = BLOCKSIZE >> 1; s >= 32; s >>= 1) {
-        if (tid < s) {
-            sr[tid] += sr[tid + s];
-        }
-        __syncthreads();
-    }
-    if (tid < 32) {
-        T val = sr[tid];
-        val += __shfl_down_sync(0xffffffff, val, 16);
-        val += __shfl_down_sync(0xffffffff, val, 8);
-        val += __shfl_down_sync(0xffffffff, val, 4);
-        val += __shfl_down_sync(0xffffffff, val, 2);
-        val += __shfl_down_sync(0xffffffff, val, 1);
-        if (tid == 0) {
-            y[row] = alpha * val + beta * y[row];
-        }
+    T val = block_reduce_sum<T, BLOCKSIZE>(acc, sr);
+    if (tid == 0) {
+        y[row] = alpha * val + beta * y[row];
     }
 }
 

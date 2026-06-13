@@ -4,8 +4,8 @@ IndentWidth: 4
 ColumnLimit: 100
 PointerAlignment: Right
 AlignAfterOpenBracket: Align
-BinPackArguments: false
-BinPackParameters: false
+BinPackArguments: true
+BinPackParameters: true
 AllowShortFunctionsOnASingleLine: None
 AllowShortIfStatementsOnASingleLine: WithoutElse
 AllowShortBlocksOnASingleLine: Empty

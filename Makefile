@@ -13,6 +13,7 @@ NVCCFLAGS  := -arch=$(ARCH) \
               -O3 \
               --expt-relaxed-constexpr \
               --extended-lambda \
+              -ccbin $(CXX) \
               -Xcompiler -Wall,-fPIC
 
 INCLUDES   := -I$(CUDA_HOME)/include -Iinclude

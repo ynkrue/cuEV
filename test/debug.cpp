@@ -28,24 +28,10 @@ static void print_matrix(const char *label, const double *h, int rows, int cols)
 }
 
 int main() {
+
     constexpr int N = 4;
     double hA[] = {
-        4,
-        1,
-        -2,
-        2,
-        1,
-        2,
-        0,
-        1,
-        -2,
-        0,
-        3,
-        -2,
-        2,
-        1,
-        -2,
-        -1,
+        4, 1, -2, 2, 1, 2, 0, 1, -2, 0, 3, -2, 2, 1, -2, -1,
     };
     print_matrix("A (input)", hA, N, N);
 

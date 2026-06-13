@@ -79,3 +79,5 @@ cuEV/
 ```bash
 doxygen Doxyfile    # output → docs/html/index.html
 ```
+
+API reference: [cuev::kernels](@ref cuev::kernels) — all kernel launchers, [cuev::solve](@ref cuev::solve) — public entry point.

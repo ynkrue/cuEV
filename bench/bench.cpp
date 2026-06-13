@@ -46,9 +46,7 @@ struct GpuTimer {
 
 // fp32 accumulation can diverge from cuBLAS's reduction order, so rtol is loose for float.
 template <typename T>
-static bool check(const T *ref,
-                  const T *got,
-                  int n,
+static bool check(const T *ref, const T *got, int n,
                   double rtol = std::is_same_v<T, float> ? 1e-2 : 1e-5,
                   double atol = std::is_same_v<T, float> ? 1e-4 : 1e-9) {
     for (int i = 0; i < n; ++i) {
@@ -69,42 +67,17 @@ static bool check(const T *ref,
 
 // Row-major A is passed as col-major Aᵀ (N×M) with CUBLAS_OP_T.
 template <typename T>
-static void cublas_gemv(cublasHandle_t handle,
-                        T alpha,
-                        const T *dA,
-                        const T *dx,
-                        T beta,
-                        T *dy,
-                        int M,
-                        int N,
-                        cudaStream_t stream) {
+static void cublas_gemv(cublasHandle_t handle, T alpha, const T *dA, const T *dx, T beta, T *dy,
+                        int M, int N, cudaStream_t stream) {
     cublasSetStream(handle, stream);
     if constexpr (std::is_same_v<T, float>) {
-        CUBLAS_CHECK(cublasSgemv(handle,
-                                 CUBLAS_OP_T,
-                                 N,
-                                 M,
-                                 (const float *)&alpha,
-                                 (const float *)dA,
-                                 N,
-                                 (const float *)dx,
-                                 1,
-                                 (const float *)&beta,
-                                 (float *)dy,
-                                 1));
+        CUBLAS_CHECK(cublasSgemv(handle, CUBLAS_OP_T, N, M, (const float *)&alpha,
+                                 (const float *)dA, N, (const float *)dx, 1, (const float *)&beta,
+                                 (float *)dy, 1));
     } else {
-        CUBLAS_CHECK(cublasDgemv(handle,
-                                 CUBLAS_OP_T,
-                                 N,
-                                 M,
-                                 (const double *)&alpha,
-                                 (const double *)dA,
-                                 N,
-                                 (const double *)dx,
-                                 1,
-                                 (const double *)&beta,
-                                 (double *)dy,
-                                 1));
+        CUBLAS_CHECK(cublasDgemv(handle, CUBLAS_OP_T, N, M, (const double *)&alpha,
+                                 (const double *)dA, N, (const double *)dx, 1,
+                                 (const double *)&beta, (double *)dy, 1));
     }
 }
 
@@ -112,18 +85,8 @@ template <typename T>
 using GemvLauncher = void (*)(T, const T *, const T *, T, T *, int, int, cudaStream_t);
 
 template <typename T>
-static void bench_gemv(const char *name,
-                       GemvLauncher<T> fn,
-                       T alpha,
-                       const T *dA,
-                       const T *dx,
-                       T beta,
-                       T *dy_tmp,
-                       const T *ref_host,
-                       int M,
-                       int N,
-                       int warmup,
-                       int iters,
+static void bench_gemv(const char *name, GemvLauncher<T> fn, T alpha, const T *dA, const T *dx,
+                       T beta, T *dy_tmp, const T *ref_host, int M, int N, int warmup, int iters,
                        cudaStream_t stream) {
     GpuTimer timer;
 
@@ -149,13 +112,13 @@ static void bench_gemv(const char *name,
 
     double bytes = ((double)M * N + N + M) * sizeof(T);
     double gbps = bytes * iters / (ms * 1e-3) / 1e9;
-    printf(
-        "  %-30s  %7.3f ms/iter   %7.2f GB/s   %s\n", name, ms / iters, gbps, ok ? "OK" : "WRONG");
+    printf("  %-30s  %7.3f ms/iter   %7.2f GB/s   %s\n", name, ms / iters, gbps,
+           ok ? "OK" : "WRONG");
 }
 
 template <typename T>
-static void
-run_gemv_suite(cublasHandle_t cublas, int M, int N, int warmup, int iters, cudaStream_t stream) {
+static void run_gemv_suite(cublasHandle_t cublas, int M, int N, int warmup, int iters,
+                           cudaStream_t stream) {
     printf("=== gemv %s  M=%d  N=%d ===\n", std::is_same_v<T, float> ? "fp32" : "fp64", M, N);
 
     std::vector<T> hA(M * N), hx(N);
@@ -192,8 +155,7 @@ run_gemv_suite(cublasHandle_t cublas, int M, int N, int warmup, int iters, cudaS
 
     double bytes_ref = ((double)M * N + N + M) * sizeof(T);
     printf("  %-30s  %7.3f ms/iter   %7.2f GB/s   (cuBLAS reference)\n\n",
-           std::is_same_v<T, float> ? "cublas_sgemv" : "cublas_dgemv",
-           ms_ref / iters,
+           std::is_same_v<T, float> ? "cublas_sgemv" : "cublas_dgemv", ms_ref / iters,
            bytes_ref * iters / (ms_ref * 1e-3) / 1e9);
 
     struct Entry {
@@ -205,8 +167,8 @@ run_gemv_suite(cublasHandle_t cublas, int M, int N, int warmup, int iters, cudaS
         {"gemv_smem", cuev::kernels::gemv_smem<T>},
     };
     for (auto &e : kernels) {
-        bench_gemv<T>(
-            e.name, e.fn, alpha, dA, dx, beta, dy_tmp, hy_ref.data(), M, N, warmup, iters, stream);
+        bench_gemv<T>(e.name, e.fn, alpha, dA, dx, beta, dy_tmp, hy_ref.data(), M, N, warmup, iters,
+                      stream);
     }
 
     CUDA_CHECK(cudaFree(dA));
@@ -222,47 +184,17 @@ run_gemv_suite(cublasHandle_t cublas, int M, int N, int warmup, int iters, cudaS
 
 // Row-major C=A*B ↔ col-major Cᵀ = Bᵀ·Aᵀ, so swap A/B and swap M/N.
 template <typename T>
-static void cublas_gemm(cublasHandle_t handle,
-                        T alpha,
-                        const T *dA,
-                        const T *dB,
-                        T beta,
-                        T *dC,
-                        int M,
-                        int N,
-                        int K,
-                        cudaStream_t stream) {
+static void cublas_gemm(cublasHandle_t handle, T alpha, const T *dA, const T *dB, T beta, T *dC,
+                        int M, int N, int K, cudaStream_t stream) {
     cublasSetStream(handle, stream);
     if constexpr (std::is_same_v<T, float>) {
-        CUBLAS_CHECK(cublasSgemm(handle,
-                                 CUBLAS_OP_N,
-                                 CUBLAS_OP_N,
-                                 N,
-                                 M,
-                                 K,
-                                 (const float *)&alpha,
-                                 (const float *)dB,
-                                 N,
-                                 (const float *)dA,
-                                 K,
-                                 (const float *)&beta,
-                                 (float *)dC,
-                                 N));
+        CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, (const float *)&alpha,
+                                 (const float *)dB, N, (const float *)dA, K, (const float *)&beta,
+                                 (float *)dC, N));
     } else {
-        CUBLAS_CHECK(cublasDgemm(handle,
-                                 CUBLAS_OP_N,
-                                 CUBLAS_OP_N,
-                                 N,
-                                 M,
-                                 K,
-                                 (const double *)&alpha,
-                                 (const double *)dB,
-                                 N,
-                                 (const double *)dA,
-                                 K,
-                                 (const double *)&beta,
-                                 (double *)dC,
-                                 N));
+        CUBLAS_CHECK(cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, (const double *)&alpha,
+                                 (const double *)dB, N, (const double *)dA, K,
+                                 (const double *)&beta, (double *)dC, N));
     }
 }
 
@@ -270,20 +202,9 @@ template <typename T>
 using GemmLauncher = void (*)(T, const T *, const T *, T, T *, int, int, int, cudaStream_t);
 
 template <typename T>
-static void bench_gemm(const char *name,
-                       GemmLauncher<T> fn,
-                       T alpha,
-                       const T *dA,
-                       const T *dB,
-                       T beta,
-                       T *dC_tmp,
-                       const T *ref_host,
-                       int M,
-                       int N,
-                       int K,
-                       int warmup,
-                       int iters,
-                       cudaStream_t stream) {
+static void bench_gemm(const char *name, GemmLauncher<T> fn, T alpha, const T *dA, const T *dB,
+                       T beta, T *dC_tmp, const T *ref_host, int M, int N, int K, int warmup,
+                       int iters, cudaStream_t stream) {
     GpuTimer timer;
 
     for (int i = 0; i < warmup; ++i) {
@@ -306,18 +227,15 @@ static void bench_gemm(const char *name,
     float ms = timer.end(stream);
 
     double tflops = 2.0 * M * N * K * iters / (ms * 1e-3) / 1e12;
-    printf("  %-30s  %7.3f ms/iter   %7.3f TFLOP/s   %s\n",
-           name,
-           ms / iters,
-           tflops,
+    printf("  %-30s  %7.3f ms/iter   %7.3f TFLOP/s   %s\n", name, ms / iters, tflops,
            ok ? "OK" : "WRONG");
 }
 
 template <typename T>
-static void run_gemm_suite(
-    cublasHandle_t cublas, int M, int N, int K, int warmup, int iters, cudaStream_t stream) {
-    printf(
-        "=== gemm %s  M=%d  N=%d  K=%d ===\n", std::is_same_v<T, float> ? "fp32" : "fp64", M, N, K);
+static void run_gemm_suite(cublasHandle_t cublas, int M, int N, int K, int warmup, int iters,
+                           cudaStream_t stream) {
+    printf("=== gemm %s  M=%d  N=%d  K=%d ===\n", std::is_same_v<T, float> ? "fp32" : "fp64", M, N,
+           K);
 
     std::vector<T> hA(M * K), hB(K * N);
     for (auto &v : hA) {
@@ -353,9 +271,7 @@ static void run_gemm_suite(
 
     double tflops_ref = 2.0 * M * N * K * iters / (ms_ref * 1e-3) / 1e12;
     printf("  %-30s  %7.3f ms/iter   %7.3f TFLOP/s   (cuBLAS reference)\n\n",
-           std::is_same_v<T, float> ? "cublas_sgemm" : "cublas_dgemm",
-           ms_ref / iters,
-           tflops_ref);
+           std::is_same_v<T, float> ? "cublas_sgemm" : "cublas_dgemm", ms_ref / iters, tflops_ref);
 
     struct Entry {
         const char *name;
@@ -368,20 +284,8 @@ static void run_gemm_suite(
         {"gemm_warptile", cuev::kernels::gemm_warptile<T>},
     };
     for (auto &e : kernels) {
-        bench_gemm<T>(e.name,
-                      e.fn,
-                      alpha,
-                      dA,
-                      dB,
-                      beta,
-                      dC_tmp,
-                      hC_ref.data(),
-                      M,
-                      N,
-                      K,
-                      warmup,
-                      iters,
-                      stream);
+        bench_gemm<T>(e.name, e.fn, alpha, dA, dB, beta, dC_tmp, hC_ref.data(), M, N, K, warmup,
+                      iters, stream);
     }
 
     CUDA_CHECK(cudaFree(dA));
@@ -398,44 +302,24 @@ static void run_gemm_suite(
 // cublasSgeam/cublasDgeam: treat row-major M×N A as col-major N×M A, request
 // CUBLAS_OP_T to get col-major M×N output = row-major N×M AT.
 template <typename T>
-static void
-cublas_transpose(cublasHandle_t handle, const T *dA, T *dAT, int M, int N, cudaStream_t stream) {
+static void cublas_transpose(cublasHandle_t handle, const T *dA, T *dAT, int M, int N,
+                             cudaStream_t stream) {
     cublasSetStream(handle, stream);
     T alpha = T(1), beta = T(0);
     if constexpr (std::is_same_v<T, float>) {
-        CUBLAS_CHECK(cublasSgeam(handle,
-                                 CUBLAS_OP_T,
-                                 CUBLAS_OP_N,
-                                 M,
-                                 N,
-                                 (const float *)&alpha,
-                                 (const float *)dA,
-                                 N,
-                                 (const float *)&beta,
-                                 (const float *)dA,
-                                 M,
-                                 (float *)dAT,
-                                 M));
+        CUBLAS_CHECK(cublasSgeam(handle, CUBLAS_OP_T, CUBLAS_OP_N, M, N, (const float *)&alpha,
+                                 (const float *)dA, N, (const float *)&beta, (const float *)dA, M,
+                                 (float *)dAT, M));
     } else {
-        CUBLAS_CHECK(cublasDgeam(handle,
-                                 CUBLAS_OP_T,
-                                 CUBLAS_OP_N,
-                                 M,
-                                 N,
-                                 (const double *)&alpha,
-                                 (const double *)dA,
-                                 N,
-                                 (const double *)&beta,
-                                 (const double *)dA,
-                                 M,
-                                 (double *)dAT,
-                                 M));
+        CUBLAS_CHECK(cublasDgeam(handle, CUBLAS_OP_T, CUBLAS_OP_N, M, N, (const double *)&alpha,
+                                 (const double *)dA, N, (const double *)&beta, (const double *)dA,
+                                 M, (double *)dAT, M));
     }
 }
 
 template <typename T>
-static void run_transpose_suite(
-    cublasHandle_t cublas, int M, int N, int warmup, int iters, cudaStream_t stream) {
+static void run_transpose_suite(cublasHandle_t cublas, int M, int N, int warmup, int iters,
+                                cudaStream_t stream) {
     printf("=== transpose %s  M=%d  N=%d ===\n", std::is_same_v<T, float> ? "fp32" : "fp64", M, N);
 
     std::vector<T> hA(M * N);
@@ -464,8 +348,7 @@ static void run_transpose_suite(
 
     double bytes_ref = 2.0 * M * N * sizeof(T);
     printf("  %-30s  %7.3f ms/iter   %7.2f GB/s   (cuBLAS reference)\n\n",
-           std::is_same_v<T, float> ? "cublas_sgeam" : "cublas_dgeam",
-           ms_ref / iters,
+           std::is_same_v<T, float> ? "cublas_sgeam" : "cublas_dgeam", ms_ref / iters,
            bytes_ref * iters / (ms_ref * 1e-3) / 1e9);
 
     for (int i = 0; i < warmup; ++i) {
@@ -491,11 +374,8 @@ static void run_transpose_suite(
     float ms = timer.end(stream);
 
     double bytes = 2.0 * M * N * sizeof(T);
-    printf("  %-30s  %7.3f ms/iter   %7.2f GB/s   %s\n",
-           "transpose",
-           ms / iters,
-           bytes * iters / (ms * 1e-3) / 1e9,
-           ok ? "OK" : "WRONG");
+    printf("  %-30s  %7.3f ms/iter   %7.2f GB/s   %s\n", "transpose", ms / iters,
+           bytes * iters / (ms * 1e-3) / 1e9, ok ? "OK" : "WRONG");
 
     CUDA_CHECK(cudaFree(dA));
     CUDA_CHECK(cudaFree(dAT_ref));
@@ -525,11 +405,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    printf("cuBench  M=%d  N=%d  K=%d  warmup=%d  iters=%d\n\n",
-           args.M,
-           args.N,
-           K,
-           args.warmup,
+    printf("cuBench  M=%d  N=%d  K=%d  warmup=%d  iters=%d\n\n", args.M, args.N, K, args.warmup,
            args.iters);
 
     cudaStream_t stream;

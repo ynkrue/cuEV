@@ -23,7 +23,7 @@
 #include <cuda.h>
 
 // =============================================================================
-// Device kernels (translation-unit private)
+// Device kernels
 // =============================================================================
 namespace {
 
@@ -41,37 +41,17 @@ __global__ void hh_reflect_kernel(T *H, T *v, T *tau, T *d, T *e, int N, int k) 
         nrm2 += a * a;
         v[i] = a;
     }
-    snrm[tid] = nrm2;
-    __syncthreads();
-
-    for (int s = blockDim.x >> 1; s >= 32; s >>= 1) {
-        if (tid < s) {
-            snrm[tid] += snrm[tid + s];
-        }
-        __syncthreads();
-    }
-
-    if (tid < 32) {
-        T val = snrm[tid];
-        val += __shfl_down_sync(0xffffffff, val, 16);
-        val += __shfl_down_sync(0xffffffff, val, 8);
-        val += __shfl_down_sync(0xffffffff, val, 4);
-        val += __shfl_down_sync(0xffffffff, val, 2);
-        val += __shfl_down_sync(0xffffffff, val, 1);
-        if (tid == 0) {
-            T norm = sqrt(val);
-            T x0 = H[(k + 1) * N + k];
-            T alpha = -copysign(norm, x0); // α = −sign(x₀)‖x‖, ensures numerical stability
-            T vTv = norm * norm - alpha * x0;
-            v[0] = x0 - alpha;
-            H[(k + 1) * N + k] = x0 - alpha;
-            tau[k] = (vTv == T(0)) ? T(0) : T(1) / vTv;
-            if (k < N - 1) {
-                e[k] = alpha;
-            }
-            d[k] = H[k * N + k];
-        }
-        // __syncthreads() omitted — tid >= 32 do not participate; kernel returns immediately after
+    T val = block_reduce_sum<T, BLOCKSIZE>(nrm2, snrm);
+    if (tid == 0) {
+        T norm = sqrt(val);
+        T x0 = H[(k + 1) * N + k];
+        T alpha = -copysign(norm, x0);
+        T vTv = norm * norm - alpha * x0;
+        v[0] = x0 - alpha;
+        H[(k + 1) * N + k] = x0 - alpha;
+        tau[k] = (vTv == T(0)) ? T(0) : T(1) / vTv;
+        if (k < N - 1) e[k] = alpha;
+        d[k] = H[k * N + k];
     }
 }
 
@@ -89,25 +69,9 @@ __global__ void hh_trail_matvec_kernel(const T *v, const T *H, T *p, int N, int 
     for (int j = tid; j < N - k - 1; j += BLOCKSIZE) {
         acc += H[row * N + (k + 1 + j)] * v[j];
     }
-    sr[tid] = acc;
-    __syncthreads();
-
-    for (int s = BLOCKSIZE >> 1; s >= 32; s >>= 1) {
-        if (tid < s) {
-            sr[tid] += sr[tid + s];
-        }
-        __syncthreads();
-    }
-    if (tid < 32) {
-        T val = sr[tid];
-        val += __shfl_down_sync(0xffffffff, val, 16);
-        val += __shfl_down_sync(0xffffffff, val, 8);
-        val += __shfl_down_sync(0xffffffff, val, 4);
-        val += __shfl_down_sync(0xffffffff, val, 2);
-        val += __shfl_down_sync(0xffffffff, val, 1);
-        if (tid == 0) {
-            p[row - k - 1] = val;
-        }
+    T val = block_reduce_sum<T, BLOCKSIZE>(acc, sr);
+    if (tid == 0) {
+        p[row - k - 1] = val;
     }
 }
 
@@ -124,26 +88,8 @@ __global__ void hh_ortho_kernel(const T *v, const T *p, const T *tau, T *u, int 
     for (int i = tid; i < N - k - 1; i += BLOCKSIZE) {
         vTp += v[i] * p[i];
     }
-    svTp[tid] = vTp;
-    __syncthreads();
-
-    for (int s = BLOCKSIZE >> 1; s >= 32; s >>= 1) {
-        if (tid < s) {
-            svTp[tid] += svTp[tid + s];
-        }
-        __syncthreads();
-    }
-    if (tid < 32) {
-        T val = svTp[tid];
-        val += __shfl_down_sync(0xffffffff, val, 16);
-        val += __shfl_down_sync(0xffffffff, val, 8);
-        val += __shfl_down_sync(0xffffffff, val, 4);
-        val += __shfl_down_sync(0xffffffff, val, 2);
-        val += __shfl_down_sync(0xffffffff, val, 1);
-        if (tid == 0) {
-            svTp[0] = val;
-        }
-    }
+    T total_vTp = block_reduce_sum<T, BLOCKSIZE>(vTp, svTp);
+    if (tid == 0) svTp[0] = total_vTp;
     __syncthreads();
 
     vTp = svTp[0];
@@ -156,7 +102,7 @@ __global__ void hh_ortho_kernel(const T *v, const T *p, const T *tau, T *u, int 
 // hh_update
 // -----------------------------------------------------------------------------
 template <typename T, int BLOCKSIZE>
-__global__ void hh_ortho_kernel(const T *v, const T *u, T *H, int N, int k) {
+__global__ void hh_update_kernel(const T *v, const T *u, T *H, int N, int k) {
     int m = N - k - 1;
     int t_row = threadIdx.x / BLOCKSIZE;
     int t_col = threadIdx.x % BLOCKSIZE;
@@ -223,11 +169,9 @@ void hh_ortho(const T *v, const T *p, const T *tau, T *u, int N, int k, cudaStre
 template <typename T>
 void hh_update(const T *v, const T *u, T *H, int N, int k, cudaStream_t stream) {
     constexpr int BLOCKSIZE = 32;
-    hh_ortho_kernel<T, BLOCKSIZE>
-        <<<dim3(div_up(N - k - 1, BLOCKSIZE), div_up(N - k - 1, BLOCKSIZE)),
-           BLOCKSIZE * BLOCKSIZE,
-           0,
-           stream>>>(v, u, H, N, k);
+    hh_update_kernel<T, BLOCKSIZE>
+        <<<dim3(div_up(N - k - 1, BLOCKSIZE), div_up(N - k - 1, BLOCKSIZE)), BLOCKSIZE * BLOCKSIZE,
+           0, stream>>>(v, u, H, N, k);
 }
 
 template <typename T>

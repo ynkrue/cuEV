@@ -19,7 +19,7 @@
 #include <type_traits>
 
 // =============================================================================
-// Device kernels (translation-unit private)
+// Device kernels
 // =============================================================================
 namespace {
 
@@ -27,8 +27,8 @@ namespace {
 // gmem
 // -----------------------------------------------------------------------------
 template <typename T, int BLOCKSIZE>
-__global__ void
-gemm_gmem_kernel(T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K) {
+__global__ void gemm_gmem_kernel(T alpha, const T *A, const T *B, T beta, T *C, int M, int N,
+                                 int K) {
     int row = blockIdx.x * BLOCKSIZE + threadIdx.x / BLOCKSIZE;
     int col = blockIdx.y * BLOCKSIZE + threadIdx.x % BLOCKSIZE;
     if (row < M && col < N) {
@@ -44,8 +44,8 @@ gemm_gmem_kernel(T alpha, const T *A, const T *B, T beta, T *C, int M, int N, in
 // smem
 // -----------------------------------------------------------------------------
 template <typename T, int BLOCKSIZE>
-__global__ void
-gemm_smem_kernel(T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K) {
+__global__ void gemm_smem_kernel(T alpha, const T *A, const T *B, T beta, T *C, int M, int N,
+                                 int K) {
     __shared__ T sA[BLOCKSIZE * BLOCKSIZE];
     __shared__ T sB[BLOCKSIZE * BLOCKSIZE];
 
@@ -54,15 +54,16 @@ gemm_smem_kernel(T alpha, const T *A, const T *B, T beta, T *C, int M, int N, in
     int b_row = blockIdx.x;
     int b_col = blockIdx.y;
 
-    if (b_row * BLOCKSIZE + t_row >= M || b_col * BLOCKSIZE + t_col >= N) return;
+    int row = b_row * BLOCKSIZE + t_row;
+    int col = b_col * BLOCKSIZE + t_col;
 
     A += b_row * BLOCKSIZE * K;
     B += b_col * BLOCKSIZE;
 
     T acc = T(0);
     for (int bk = 0; bk < K; bk += BLOCKSIZE) {
-        sA[t_row * BLOCKSIZE + t_col] = (bk + t_col < K) ? A[t_row * K + t_col] : T(0);
-        sB[t_row * BLOCKSIZE + t_col] = (bk + t_row < K) ? B[t_row * N + t_col] : T(0);
+        sA[t_row * BLOCKSIZE + t_col] = (row < M && bk + t_col < K) ? A[t_row * K + t_col] : T(0);
+        sB[t_row * BLOCKSIZE + t_col] = (bk + t_row < K && col < N) ? B[t_row * N + t_col] : T(0);
         __syncthreads();
         A += BLOCKSIZE;
         B += BLOCKSIZE * N;
@@ -72,16 +73,18 @@ gemm_smem_kernel(T alpha, const T *A, const T *B, T beta, T *C, int M, int N, in
         __syncthreads();
     }
 
-    C += b_row * BLOCKSIZE * N + b_col * BLOCKSIZE;
-    C[t_row * N + t_col] = alpha * acc + beta * C[t_row * N + t_col];
+    if (row < M && col < N) {
+        C += b_row * BLOCKSIZE * N + b_col * BLOCKSIZE;
+        C[t_row * N + t_col] = alpha * acc + beta * C[t_row * N + t_col];
+    }
 }
 
 // -----------------------------------------------------------------------------
 // tiled
 // -----------------------------------------------------------------------------
 template <typename T, int BM, int BN, int BK, int TM, int TN>
-__global__ void
-gemm_tiled_kernel(T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K) {
+__global__ void gemm_tiled_kernel(T alpha, const T *A, const T *B, T beta, T *C, int M, int N,
+                                  int K) {
     __shared__ T sA[BM * BK];
     __shared__ T sB[BK * BN];
     T rA[TM], rB[TN];
@@ -156,18 +159,11 @@ template <typename T> struct alignas(16) Vec128 {
     T v[width];
 };
 
-template <typename T,
-          int BM,
-          int BN,
-          int BK,
-          int WM,
-          int WN,
-          int WNITER,
-          int TM,
-          int TN,
+template <typename T, int BM, int BN, int BK, int WM, int WN, int WNITER, int TM, int TN,
           int NUM_THREADS>
-__global__ __launch_bounds__(NUM_THREADS) void gemm_warptile_kernel(
-    T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K) {
+__global__ __launch_bounds__(NUM_THREADS) void gemm_warptile_kernel(T alpha, const T *A, const T *B,
+                                                                    T beta, T *C, int M, int N,
+                                                                    int K) {
     using Vec = Vec128<T>;
     constexpr int V = Vec::width;
     constexpr int WARPSIZE = 32;
@@ -267,8 +263,8 @@ namespace cuev {
 namespace kernels {
 
 template <typename T>
-void gemm_gmem(
-    T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K, cudaStream_t stream) {
+void gemm_gmem(T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K,
+               cudaStream_t stream) {
     constexpr int BLOCKSIZE = 32;
     gemm_gmem_kernel<T, BLOCKSIZE>
         <<<dim3(div_up(M, BLOCKSIZE), div_up(N, BLOCKSIZE)), BLOCKSIZE * BLOCKSIZE, 0, stream>>>(
@@ -276,8 +272,8 @@ void gemm_gmem(
 }
 
 template <typename T>
-void gemm_smem(
-    T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K, cudaStream_t stream) {
+void gemm_smem(T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K,
+               cudaStream_t stream) {
     constexpr int BLOCKSIZE = 32;
     gemm_smem_kernel<T, BLOCKSIZE>
         <<<dim3(div_up(M, BLOCKSIZE), div_up(N, BLOCKSIZE)), BLOCKSIZE * BLOCKSIZE, 0, stream>>>(
@@ -285,17 +281,17 @@ void gemm_smem(
 }
 
 template <typename T>
-void gemm_tiled(
-    T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K, cudaStream_t stream) {
+void gemm_tiled(T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K,
+                cudaStream_t stream) {
     constexpr int BM = 128, BN = 128, BK = 8, TM = 8, TN = 8;
     gemm_tiled_kernel<T, BM, BN, BK, TM, TN>
-        <<<dim3(div_up(N, BN), div_up(M, BM)), BM * BN / (TM * TN), 0, stream>>>(
-            alpha, A, B, beta, C, M, N, K);
+        <<<dim3(div_up(N, BN), div_up(M, BM)), BM * BN / (TM * TN), 0, stream>>>(alpha, A, B, beta,
+                                                                                 C, M, N, K);
 }
 
 template <typename T>
-void gemm_warptile(
-    T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K, cudaStream_t stream) {
+void gemm_warptile(T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K,
+                   cudaStream_t stream) {
     if constexpr (std::is_same_v<T, float>) {
         constexpr int BM = 128, BN = 128, BK = 16, WM = 64, WN = 64, WNITER = 4, TM = 8, TN = 4,
                       NT = 128;

@@ -113,30 +113,30 @@ void gemv_smem(T alpha, const T *A, const T *x, T beta, T *y, int M, int N, cuda
  * @param[in]     stream CUDA stream
  */
 template <typename T>
-inline void
-gemm(T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K, cudaStream_t stream) {
+inline void gemm(T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K,
+                 cudaStream_t stream) {
     gemm_warptile(alpha, A, B, beta, C, M, N, K, stream);
 }
 
 /// gmem variant — one thread per output element
 template <typename T>
-void gemm_gmem(
-    T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K, cudaStream_t stream);
+void gemm_gmem(T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K,
+               cudaStream_t stream);
 
 /// smem variant — shared-memory tiled, one block per output tile
 template <typename T>
-void gemm_smem(
-    T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K, cudaStream_t stream);
+void gemm_smem(T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K,
+               cudaStream_t stream);
 
 /// register-tiled variant — each thread accumulates a TM×TN output tile
 template <typename T>
-void gemm_tiled(
-    T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K, cudaStream_t stream);
+void gemm_tiled(T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K,
+                cudaStream_t stream);
 
 /// warp-tiled variant — 128-bit vectorized loads, sA transposed in smem for coalesced reads
 template <typename T>
-void gemm_warptile(
-    T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K, cudaStream_t stream);
+void gemm_warptile(T alpha, const T *A, const T *B, T beta, T *C, int M, int N, int K,
+                   cudaStream_t stream);
 
 // =============================================================================
 // Householder transforms
@@ -270,13 +270,87 @@ template <typename T> void eig_leaf(const T *d, const T *e, T *eval, T *QT, cuda
  * @tparam T      float or double
  * @param[in]     d      diagonal of T, length n
  * @param[in]     e      subdiagonal of T, length n−1
+ * @param[in]     n      dimension of T
  * @param[in]     k      split point: first half is [0,k), second is [k,n)
  * @param[out]    d1     diagonal of T₁, length k
  * @param[out]    d2     diagonal of T₂, length n−k
  * @param[in]     stream CUDA stream
  */
 template <typename T>
-void eig_split(const T *d, const T *e, int k, T *d1, T *d2, cudaStream_t stream);
+void eig_split(const T *d, const T *e, int n, int k, T *d1, T *d2, cudaStream_t stream);
+
+/**
+ * @brief Merge two sorted eigenvalue arrays into one sorted array.
+ *
+ * Standard two-way merge of eval1[0:k] and eval2[0:n-k], both in ascending
+ * order, into eval[0:n].  Required before eig_secular so the combined
+ * diagonal d is globally sorted.
+ *
+ * @tparam T      float or double
+ * @param[in]     eval1  eigenvalues of T₁, length k, ascending
+ * @param[in]     eval2  eigenvalues of T₂, length n−k, ascending
+ * @param[in]     n      total number of eigenvalues
+ * @param[in]     k      split point: size of first half
+ * @param[out]    eval   merged eigenvalues, length n, ascending
+ * @param[in]     stream CUDA stream
+ */
+template <typename T>
+void eig_sort(const T *eval1, const T *eval2, int n, int k, T *eval, cudaStream_t stream);
+
+/**
+ * @brief Solve the secular equation and compute eigenvectors of the rank-1 problem.
+ *
+ * Finds all n eigenvalues and eigenvectors of the rank-1 modified problem
+ *   M = diag(d) + β·zzᵀ,   z[i] = Q1[k−1, i]  (i < k)
+ *                                   Q2[0,   i−k] (i ≥ k)
+ *
+ * Each eigenvalue satisfies the secular equation
+ *   f(λ) = 1 + β·Σᵢ zᵢ²/(dᵢ−λ) = 0
+ * with exactly one root per interval.  The poles dᵢ are kept paired with zᵢ
+ * via the unsorted split: dᵢ = eval1[i] for i < k, eval2[i−k] for i ≥ k.
+ * The sorted merge eval_sorted (output of eig_sort) provides interval bounds.
+ *
+ * @tparam T           float or double
+ * @param[in]  eval1   eigenvalues of T₁, length k, ascending (poles for i < k)
+ * @param[in]  eval2   eigenvalues of T₂, length n−k, ascending (poles for i ≥ k)
+ * @param[in]  eval_sorted  sorted merge of eval1 and eval2, length n (from eig_sort)
+ * @param[in]  Q1      k×k eigenvector matrix of T₁, row-major (rows = eigenvectors)
+ * @param[in]  Q2      (n−k)×(n−k) eigenvector matrix of T₂, row-major (rows = eigenvectors)
+ * @param[in]  e       subdiagonal of T, length n−1 (e[k−1] = β)
+ * @param[in]  n       total dimension
+ * @param[in]  k       split point
+ * @param[out] eval    secular eigenvalues, length n, ascending
+ * @param[out] G       n×n eigenvector matrix of M, row-major (rows = eigenvectors)
+ * @param[in]  stream  CUDA stream
+ */
+template <typename T>
+void eig_secular(const T *eval1, const T *eval2, const T *eval_sorted, const T *Q1, const T *Q2,
+                 const T *e, int n, int k, T *eval, T *G, cudaStream_t stream);
+
+/**
+ * @brief Back-transform eigenvectors: QT ← G · diag(Q1, Q2).
+ *
+ * Combines the sub-problem eigenvector matrices Q1 and Q2 with the secular
+ * eigenvector matrix G to produce the full eigenvector matrix of T.
+ * All matrices use rows-as-eigenvectors convention (row-major).
+ *
+ *   QT = G · diag(Q1, Q2)
+ *
+ * Implemented via the transpose identity to avoid strided column-block access:
+ *   QT^T[0:k, :]   ← Q1^T · G^T[0:k, :]   (k×k     ·  k×n)
+ *   QT^T[k:n, :]   ← Q2^T · G^T[k:n, :]   ((n−k)×(n−k) · (n−k)×n)
+ *
+ * @tparam T      float or double
+ * @param[in]     Q1     k×k eigenvector matrix of T₁, row-major, rows = eigenvectors
+ * @param[in]     Q2     (n−k)×(n−k) eigenvector matrix of T₂, row-major, rows = eigenvectors
+ * @param[in]     G      n×n secular eigenvector matrix, row-major, rows = eigenvectors
+ * @param[out]    QT     n×n output eigenvector matrix of T, row-major, rows = eigenvectors
+ * @param[in]     n      total dimension
+ * @param[in]     k      split point
+ * @param[in]     stream CUDA stream
+ */
+template <typename T>
+void eig_gemm(const T *Q1, const T *Q2, const T *G, T *QT, int n, int k, cudaStream_t stream);
 
 } // namespace kernels
 } // namespace cuev
@@ -290,7 +364,7 @@ namespace cuev {
  * @brief Compute all eigenvalues and eigenvectors of a real symmetric matrix.
  *
  * Reduces H to tridiagonal form via Householder projections, solves the
- * tridiagonal eigenproblem with divide-and-conquer (STEDC), then applies
+ * tridiagonal eigenproblem with divide-and-conquer, then applies
  * the back-transformation to recover eigenvectors of H.
  *
  * @tparam T      float or double
