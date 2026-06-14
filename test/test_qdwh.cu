@@ -35,14 +35,6 @@ template <typename T> static void host_coeffs(T &l, T &a, T &b, T &c) {
     l = l * (a + b * l * l) / (T(1) + c * l * l);
 }
 
-// Frobenius norm of a host matrix (col-major).
-static double frob(const std::vector<double> &M, int n) {
-    double s = 0;
-    for (double v : M)
-        s += v * v;
-    return std::sqrt(s);
-}
-
 // Matrix multiply C = A*B on host (col-major, all square n×n).
 static std::vector<double> matmul(const std::vector<double> &A, const std::vector<double> &B,
                                   int n) {

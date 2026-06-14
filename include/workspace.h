@@ -18,7 +18,7 @@
 namespace cuev {
 
 /// Base-case threshold for spectral_dc recursion.
-constexpr int SDC_BASE_N = 256;
+constexpr int SDC_BASE_N = 512;
 
 /**
  * @brief Single-allocation workspace for the entire spectral D&C eigensolver.
@@ -32,6 +32,7 @@ constexpr int SDC_BASE_N = 256;
  *   cuSOLVER scratch:
  *     geqrf_buf    geqrf(2n, n)     — reused for geqrf(n, n), which is smaller
  *     orgqr_buf    orgqr(2n, n)     — reused for orgqr(n, n)
+ *     potrf_buf    potrf(n)         — Cholesky-based QDWH update
  *     syevd_buf    syevd(SDC_BASE_N)
  *     d_info       1 × int
  *
@@ -59,6 +60,8 @@ template <typename T> struct SolverWorkspace {
     int geqrf_lwork;
     T *orgqr_buf;
     int orgqr_lwork;
+    T *potrf_buf;
+    int potrf_lwork;
     T *syevd_buf;
     int syevd_lwork;
     int *d_info;

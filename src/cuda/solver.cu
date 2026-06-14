@@ -42,12 +42,14 @@ SolverWorkspace<T> workspace_alloc(cusolverDnHandle_t h, int n, cudaStream_t str
         CUSOLVER_CHECK(cusolverDnSgeqrf_bufferSize(h, 2 * n, n, nullptr, 2 * n, &ws.geqrf_lwork));
         CUSOLVER_CHECK(
             cusolverDnSorgqr_bufferSize(h, 2 * n, n, n, nullptr, 2 * n, nullptr, &ws.orgqr_lwork));
+        CUSOLVER_CHECK(cusolverDnSpotrf_bufferSize(h, uplo, n, nullptr, n, &ws.potrf_lwork));
         CUSOLVER_CHECK(cusolverDnSsyevd_bufferSize(h, jobz, uplo, SDC_BASE_N, nullptr, SDC_BASE_N,
                                                    nullptr, &ws.syevd_lwork));
     } else {
         CUSOLVER_CHECK(cusolverDnDgeqrf_bufferSize(h, 2 * n, n, nullptr, 2 * n, &ws.geqrf_lwork));
         CUSOLVER_CHECK(
             cusolverDnDorgqr_bufferSize(h, 2 * n, n, n, nullptr, 2 * n, nullptr, &ws.orgqr_lwork));
+        CUSOLVER_CHECK(cusolverDnDpotrf_bufferSize(h, uplo, n, nullptr, n, &ws.potrf_lwork));
         CUSOLVER_CHECK(cusolverDnDsyevd_bufferSize(h, jobz, uplo, SDC_BASE_N, nullptr, SDC_BASE_N,
                                                    nullptr, &ws.syevd_lwork));
     }
@@ -56,7 +58,8 @@ SolverWorkspace<T> workspace_alloc(cusolverDnHandle_t h, int n, cudaStream_t str
 
     size_t off_geqrf = 0;
     size_t off_orgqr = off_geqrf + align((size_t)ws.geqrf_lwork * sizeof(T));
-    size_t off_syevd = off_orgqr + align((size_t)ws.orgqr_lwork * sizeof(T));
+    size_t off_potrf = off_orgqr + align((size_t)ws.orgqr_lwork * sizeof(T));
+    size_t off_syevd = off_potrf + align((size_t)ws.potrf_lwork * sizeof(T));
     size_t off_info = off_syevd + align((size_t)ws.syevd_lwork * sizeof(T));
     size_t off_W = off_info + align(sizeof(int));
     size_t off_tau = off_W + align(2u * (size_t)n * n * sizeof(T));
@@ -71,6 +74,7 @@ SolverWorkspace<T> workspace_alloc(cusolverDnHandle_t h, int n, cudaStream_t str
     char *base = static_cast<char *>(ws.pool);
     ws.geqrf_buf = reinterpret_cast<T *>(base + off_geqrf);
     ws.orgqr_buf = reinterpret_cast<T *>(base + off_orgqr);
+    ws.potrf_buf = reinterpret_cast<T *>(base + off_potrf);
     ws.syevd_buf = reinterpret_cast<T *>(base + off_syevd);
     ws.d_info = reinterpret_cast<int *>(base + off_info);
     ws.qdwh_W = reinterpret_cast<T *>(base + off_W);

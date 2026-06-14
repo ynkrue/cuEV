@@ -190,6 +190,16 @@ template <typename T>
 void geam(cublasHandle_t h, cublasOperation_t transa, cublasOperation_t transb, int m, int n,
           const T *alpha, const T *A, int lda, const T *beta, const T *B, int ldb, T *C, int ldc);
 
+/// C ← α·op(A)·op(A)ᵀ + β·C  (only @p uplo triangle of C is referenced/written)
+template <typename T>
+void syrk(cublasHandle_t h, cublasFillMode_t uplo, cublasOperation_t trans, int n, int k,
+          const T *alpha, const T *A, int lda, const T *beta, T *C, int ldc);
+
+/// B ← α·B·op(A)⁻¹  (side = right, triangular A); B overwritten with the solution
+template <typename T>
+void trsm(cublasHandle_t h, cublasSideMode_t side, cublasFillMode_t uplo, cublasOperation_t trans,
+          cublasDiagType_t diag, int m, int n, const T *alpha, const T *A, int lda, T *B, int ldb);
+
 /// x ← α·x
 template <typename T> void scal(cublasHandle_t h, int n, const T *alpha, T *x, int incx);
 
@@ -209,8 +219,8 @@ template <typename T> void nrm2(cublasHandle_t h, int n, const T *x, int incx, T
  * @brief Type-generic wrappers for cuSOLVER dense routines.
  *
  * All functions receive a @ref SolverWorkspace pointer and use its pre-allocated
- * buffers (geqrf_buf / orgqr_buf / syevd_buf / d_info).  No allocation occurs
- * inside these wrappers; all scratch is managed by workspace_alloc / workspace_free.
+ * buffers (geqrf_buf / orgqr_buf / potrf_buf / syevd_buf / d_info).  No allocation
+ * occurs inside these wrappers; all scratch is managed by workspace_alloc / free.
  */
 namespace cusolver {
 
@@ -252,6 +262,25 @@ void geqrf(cusolverDnHandle_t h, int m, int n, T *A, int lda, T *tau, SolverWork
  */
 template <typename T>
 void orgqr(cusolverDnHandle_t h, int m, int n, int k, T *A, int lda, const T *tau,
+           SolverWorkspace<T> *ws, cudaStream_t stream);
+
+/**
+ * @brief Cholesky factorisation of an SPD matrix: A ← U  (A = UᵀU, upper).
+ *
+ * Used by the Cholesky-based QDWH update once the iterate is well-conditioned.
+ * Uses ws->potrf_buf and ws->d_info.
+ *
+ * @tparam T         float or double
+ * @param[in]     h        cuSOLVER handle
+ * @param[in]     uplo     which triangle holds A and receives the factor
+ * @param[in]     n        matrix dimension
+ * @param[in,out] A        n×n SPD matrix, column-major; overwritten with the factor
+ * @param[in]     lda      leading dimension
+ * @param[in]     ws       pre-allocated workspace (potrf_buf, d_info)
+ * @param[in]     stream   CUDA stream
+ */
+template <typename T>
+void potrf(cusolverDnHandle_t h, cublasFillMode_t uplo, int n, T *A, int lda,
            SolverWorkspace<T> *ws, cudaStream_t stream);
 
 /**

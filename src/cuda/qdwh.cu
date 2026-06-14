@@ -2,16 +2,17 @@
  * @file   qdwh.cu
  * @brief  QDWH polar iteration for computing the matrix sign function.
  *
- * Implements sign(B) for real symmetric B via the QR-based QDWH algorithm
- * (Nakatsukasa & Higham, SISC 2010). Used as the core primitive of the
+ * Implements sign(B) for real symmetric B via the QDWH algorithm
+ * (Nakatsukasa & Higham, SISC 2013). Used as the core primitive of the
  * spectral divide-and-conquer eigensolver.
  *
- * Kernel sequence per QDWH iteration:
- *   qdwh_eye        fill bottom block of W with identity
- *   (cuBLAS)        scale top block: W[0:n,:] = √cₖ · B
- *   (cuSOLVER)      thin QR of 2n×n W → Q, R
- *   (cuBLAS)        update B ← (bₖ/cₖ) B + coeff · Q₁ Q₂ᵀ
- *   qdwh_symmetrize restore symmetry after floating-point drift
+ * Each iteration applies one of two mathematically equivalent updates, chosen by
+ * the conditioning of the iterate (coefficient cₖ):
+ *   qdwh_step_qr    cₖ > 100 — QR of [√cₖ·B ; I] (2n×n); always stable
+ *   qdwh_step_chol  cₖ ≤ 100 — Cholesky of I + cₖ·BᵀB (n×n); ~half the flops
+ * followed by qdwh_symmetrize to undo floating-point drift. With cubic
+ * convergence the iteration reaches machine precision in ≤6 steps; typically
+ * the first ~2 steps use QR and the rest Cholesky.
  *
  * @author  Yannik Rüfenacht
  * @date    2026-06
@@ -129,6 +130,71 @@ template <typename T> static void qdwh_coeffs(T &l, T &a, T &b, T &c) {
 
 namespace kernels {
 
+// -----------------------------------------------------------------------------
+// One QDWH step via QR (always stable; used while the iterate is ill-conditioned).
+//   [√c·X ; I] = [Q₁ ; Q₂]·R,   X ← (b/c)·X + (a − b/c)/√c · Q₁·Q₂ᵀ
+// -----------------------------------------------------------------------------
+template <typename T>
+static void qdwh_step_qr(cublasHandle_t cublas_h, cusolverDnHandle_t cusolver_h, T *X, int n, T a,
+                         T b, T c, SolverWorkspace<T> *ws, cudaStream_t stream) {
+    T *W = ws->qdwh_W;
+    T *tau = ws->qdwh_tau;
+    T scale = std::sqrt(c);
+    T zero = T(0);
+    T one = T(1);
+
+    // W = [√c · X ; I_n]
+    cuev::cublas::geam(cublas_h, CUBLAS_OP_N, CUBLAS_OP_N, n, n, &scale, X, n, &zero, W, 2 * n, W,
+                       2 * n);
+    qdwh_eye(W, n, stream);
+
+    // QR of W (2n×n): W = Q · R
+    cuev::cusolver::geqrf(cusolver_h, 2 * n, n, W, 2 * n, tau, ws, stream);
+    cuev::cusolver::orgqr(cusolver_h, 2 * n, n, n, W, 2 * n, tau, ws, stream);
+
+    // Q₁ = W[0:n, :], Q₂ = W[n:2n, :];  X ← (b/c)·X + (a − b/c)/√c · Q₁·Q₂ᵀ
+    T bc = b / c;
+    T coeff = (a - bc) / scale;
+    T *Q1 = W;
+    T *Q2 = W + n;
+    cuev::cublas::scal(cublas_h, n * n, &bc, X, 1);
+    cuev::cublas::gemm(cublas_h, CUBLAS_OP_N, CUBLAS_OP_T, n, n, n, &coeff, Q1, 2 * n, Q2, 2 * n,
+                       &one, X, n);
+}
+
+// -----------------------------------------------------------------------------
+// One QDWH step via Cholesky (~half the flops, no orgqr; valid once Z is well
+// conditioned, i.e. c ≤ CHOL_SWITCH so κ(Z) = 1 + c·σ_max² ≤ 1 + c).
+//   Z = I + c·XᵀX = UᵀU,   X ← (b/c)·X + (a − b/c)·X·Z⁻¹  (= X·U⁻¹·U⁻ᵀ)
+// Z and the X·Z⁻¹ temp are carved from the 2n×n QR work matrix (unused here).
+// -----------------------------------------------------------------------------
+template <typename T>
+static void qdwh_step_chol(cublasHandle_t cublas_h, cusolverDnHandle_t cusolver_h, T *X, int n, T a,
+                           T b, T c, SolverWorkspace<T> *ws, cudaStream_t stream) {
+    T *Z = ws->qdwh_W;                   // n×n, ld n
+    T *tmp = ws->qdwh_W + (size_t)n * n; // n×n, ld n
+    T zero = T(0);
+    T one = T(1);
+    cublasFillMode_t uplo = CUBLAS_FILL_MODE_UPPER;
+
+    // Z = I + c·XᵀX  (upper triangle only), then Cholesky Z ← U
+    cuev::cublas::syrk(cublas_h, uplo, CUBLAS_OP_T, n, n, &c, X, n, &zero, Z, n);
+    qdwh_shift(Z, -one, n, stream); // Z[i,i] += 1
+    cuev::cusolver::potrf(cusolver_h, uplo, n, Z, n, ws, stream);
+
+    // tmp ← X, then tmp ← X·U⁻¹·U⁻ᵀ = X·Z⁻¹  (two right triangular solves)
+    cuev::cublas::copy(cublas_h, n * n, X, 1, tmp, 1);
+    cuev::cublas::trsm(cublas_h, CUBLAS_SIDE_RIGHT, uplo, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n, n,
+                       &one, Z, n, tmp, n);
+    cuev::cublas::trsm(cublas_h, CUBLAS_SIDE_RIGHT, uplo, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, n,
+                       &one, Z, n, tmp, n);
+
+    // X ← (b/c)·X + (a − b/c)·tmp
+    T bc = b / c;
+    T coeff = a - bc;
+    cuev::cublas::geam(cublas_h, CUBLAS_OP_N, CUBLAS_OP_N, n, n, &bc, X, n, &coeff, tmp, n, X, n);
+}
+
 // =============================================================================
 // qdwh_sign
 // =============================================================================
@@ -136,11 +202,9 @@ namespace kernels {
 template <typename T>
 void qdwh_sign(cublasHandle_t cublas_h, cusolverDnHandle_t cusolver_h, T *B, int n,
                SolverWorkspace<T> *ws, cudaStream_t stream) {
-    T *W = ws->qdwh_W;
-    T *tau = ws->qdwh_tau;
-
     // Normalise: B ← B / ‖B‖_F.  ‖B‖_F ≥ ‖B‖_2 = σ_max, so σ_max(B) ≤ 1 after
-    // scaling — the precondition for QDWH convergence.
+    // scaling — the precondition for QDWH convergence, and it guarantees
+    // κ(I + c·BᵀB) ≤ 1 + c so the c ≤ CHOL_SWITCH test below is a safe gate.
     T h_norm;
     cuev::cublas::nrm2(cublas_h, n * n, B, 1, &h_norm);
     T inv_norm = T(1) / h_norm;
@@ -153,39 +217,26 @@ void qdwh_sign(cublasHandle_t cublas_h, cusolverDnHandle_t cusolver_h, T *B, int
     // near the split point μ under-resolved — modes there get misassigned.)
     T l = std::numeric_limits<T>::epsilon();
 
+    // c_k decreases monotonically (huge when l≈0, → 3 as l→1). Use the cheap
+    // Cholesky update once c drops below this; the first ~2 iterations stay on QR.
+    constexpr T CHOL_SWITCH = T(100);
+
     constexpr int MAX_ITER = 6;
     for (int iter = 0; iter < MAX_ITER; ++iter) {
         T a, b, c;
         qdwh_coeffs(l, a, b, c);
 
-        // W = [√c · B ; I_n]
-        T scale = std::sqrt(c);
-        T zero = T(0);
-        cuev::cublas::geam(cublas_h, CUBLAS_OP_N, CUBLAS_OP_N, n, n, &scale, B, n, &zero, W, 2 * n,
-                           W, 2 * n);
-        qdwh_eye(W, n, stream);
+        if (c > CHOL_SWITCH)
+            qdwh_step_qr(cublas_h, cusolver_h, B, n, a, b, c, ws, stream);
+        else
+            qdwh_step_chol(cublas_h, cusolver_h, B, n, a, b, c, ws, stream);
 
-        // QR of W (2n×n): W = Q · R
-        cuev::cusolver::geqrf(cusolver_h, 2 * n, n, W, 2 * n, tau, ws, stream);
-        cuev::cusolver::orgqr(cusolver_h, 2 * n, n, n, W, 2 * n, tau, ws, stream);
-
-        // Q₁ = W[0:n, :], Q₂ = W[n:2n, :]
-        // B ← (b/c)·B + (a − b/c)/√c · Q₁·Q₂ᵀ
-        T bc = b / c;
-        T coeff = (a - bc) / scale;
-        T one = T(1);
-
-        T *Q1 = W;
-        T *Q2 = W + n; // W[n:2n, :]
-        cuev::cublas::scal(cublas_h, n * n, &bc, B, 1);
-        cuev::cublas::gemm(cublas_h, CUBLAS_OP_N, CUBLAS_OP_T, n, n, n, &coeff, Q1, 2 * n, Q2,
-                           2 * n, &one, B, n);
         qdwh_symmetrize(B, n, stream);
 
         if (l >= T(1) - T(1e-14)) break;
     }
 
-    // W and tau are owned by ws — nothing to free here.
+    // qdwh_W and qdwh_tau are owned by ws — nothing to free here.
 }
 
 // =============================================================================

@@ -55,6 +55,18 @@ void orgqr(cusolverDnHandle_t h, int m, int n, int k, T *A, int lda, const T *ta
 }
 
 template <typename T>
+void potrf(cusolverDnHandle_t h, cublasFillMode_t uplo, int n, T *A, int lda,
+           SolverWorkspace<T> *ws, cudaStream_t stream) {
+    if constexpr (std::is_same_v<T, float>)
+        CUSOLVER_CHECK(
+            cusolverDnSpotrf(h, uplo, n, A, lda, ws->potrf_buf, ws->potrf_lwork, ws->d_info));
+    else
+        CUSOLVER_CHECK(
+            cusolverDnDpotrf(h, uplo, n, A, lda, ws->potrf_buf, ws->potrf_lwork, ws->d_info));
+    check_info(ws->d_info, "potrf", stream);
+}
+
+template <typename T>
 void syevd(cusolverDnHandle_t h, int n, T *A, int lda, T *W, SolverWorkspace<T> *ws,
            cudaStream_t stream) {
     cusolverEigMode_t jobz = CUSOLVER_EIG_MODE_VECTOR;
@@ -75,6 +87,8 @@ void syevd(cusolverDnHandle_t h, int n, T *A, int lda, T *W, SolverWorkspace<T> 
     template void geqrf<T>(cusolverDnHandle_t, int, int, T *, int, T *, SolverWorkspace<T> *,      \
                            cudaStream_t);                                                          \
     template void orgqr<T>(cusolverDnHandle_t, int, int, int, T *, int, const T *,                 \
+                           SolverWorkspace<T> *, cudaStream_t);                                    \
+    template void potrf<T>(cusolverDnHandle_t, cublasFillMode_t, int, T *, int,                    \
                            SolverWorkspace<T> *, cudaStream_t);                                    \
     template void syevd<T>(cusolverDnHandle_t, int, T *, int, T *, SolverWorkspace<T> *,           \
                            cudaStream_t);
