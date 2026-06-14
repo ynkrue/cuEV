@@ -20,6 +20,7 @@
 #include "cuev.h"
 #include "kernels.cuh"
 #include <algorithm>
+#include <cmath>
 #include <cublas_v2.h>
 #include <cusolverDn.h>
 #include <type_traits>
@@ -61,8 +62,9 @@ SolverWorkspace<T> workspace_alloc(cusolverDnHandle_t h, int n, cudaStream_t str
     size_t off_tau = off_W + align(2u * (size_t)n * n * sizeof(T));
     size_t off_data = off_tau + align((size_t)n * sizeof(T));
 
-    // Data pool: 3n² elements (B, Q, H1/H2, evec1/2, eval1/2 stack)
-    ws.data_cap = (size_t)3 * n * n;
+    // Data pool: 6n² elements (B, Q, H1/H2, evec1/2, eval1/2 recursion stack).
+    // See workspace.h for the derivation; push() aborts if this is exceeded.
+    ws.data_cap = (size_t)6 * n * n;
     size_t total = off_data + ws.data_cap * sizeof(T);
 
     CUDA_CHECK(cudaMalloc(&ws.pool, total));
@@ -95,7 +97,9 @@ void spectral_dc(cublasHandle_t cublas, cusolverDnHandle_t cusolver, T *H, int n
                  SolverWorkspace<T> *ws, cudaStream_t stream) {
     // --- Base case: cuSOLVER syevd ---
     if (n <= SDC_BASE_N) {
-
+        cusolver::syevd(cusolver, n, H, n, eval, ws, stream); // overwrites H with eigenvectors
+        CUDA_CHECK(
+            cudaMemcpyAsync(evec, H, (size_t)n * n * sizeof(T), cudaMemcpyDeviceToDevice, stream));
         return;
     }
 
@@ -106,31 +110,36 @@ void spectral_dc(cublasHandle_t cublas, cusolverDnHandle_t cusolver, T *H, int n
     T mu = kernels::sdc_trace(H, n, stream) / T(n);
 
     // --- B ← copy of H, then B ← sign(H − μI) via QDWH ---
-    // B also serves as the projector P and then as Q after QR.
     T *B = ws->push((size_t)n * n);
     CUDA_CHECK(cudaMemcpyAsync(B, H, (size_t)n * n * sizeof(T), cudaMemcpyDeviceToDevice, stream));
     kernels::qdwh_shift(B, mu, n, stream);
-    qdwh_sign(cublas, cusolver, B, n, ws, stream);
+    kernels::qdwh_sign(cublas, cusolver, B, n, ws, stream);
 
-    // --- P = (I + sign(B)) / 2  (in-place in B) ---
-    // TODO: cublas::geam for scale-and-add, then add 0.5·I
+    // --- P = (I + sign(B)) / 2 — spectral projector onto eigenvalues > μ ---
+    T *P = B;
+    T half = T(0.5);
+    T zero = T(0);
+    cublas::geam(cublas, CUBLAS_OP_N, CUBLAS_OP_N, n, n, &half, P, n, &zero, P, n, P, n);
+    kernels::qdwh_shift(P, -half, n, stream);
 
-    // --- QR(P) → Q (column-major, n×n); Q1 = Q[:, 0:k], Q2 = Q[:, k:n] ---
+    // --- Split size k = rank(P) ---
+    // P is an orthogonal projector: eigenvalues are exactly 1 (×k) and 0 (×n−k),
+    // so trace(P) = rank(P) = k exactly. This is robust; counting QR-diagonal
+    // entries would require column-pivoted QR (geqp3), which cuSOLVER lacks.
+    int k = (int)std::lround(kernels::sdc_trace(P, n, stream));
+
+    // --- QR(P) → Q; Q1 = Q[:,0:k], Q2 = Q[:,k:n] ---
     T *tau_P = ws->push((size_t)n);
-    // TODO: cusolver::geqrf(cusolver, n, n, B, n, tau_P, ws, stream);
-    // TODO: cusolver::orgqr(cusolver, n, n, n, B, n, tau_P, ws, stream);
-    // TODO: k = kernels::sdc_rank(B_R_diagonal, n, stream);  (R stored in upper triangle before
-    // orgqr)
-    int k = n / 2; // placeholder
+    cusolver::geqrf(cusolver, n, n, P, n, tau_P, ws, stream);
+    cusolver::orgqr(cusolver, n, n, k, P, n, tau_P, ws, stream);
 
-    // Column-major: col stride = n, so Q2 starts at column k.
-    T *Q1 = B;                 // n×k, cols 0..k-1
-    T *Q2 = B + (size_t)n * k; // n×(n-k), cols k..n-1
+    T *Q1 = P;                 // n×k, cols 0..k-1
+    T *Q2 = P + (size_t)n * k; // n×(n-k), cols k..n-1
 
     // --- Form subproblems ---
     T *H1 = ws->push((size_t)k * k);
     T *H2 = ws->push((size_t)(n - k) * (n - k));
-    kernels::sdc_split(cublas, H, Q1, Q2, H1, H2, n, k, stream);
+    kernels::sdc_split(cublas, H, Q1, Q2, H1, H2, n, k, ws, stream);
 
     // --- Recurse --- allocate output buffers, then recurse
     T *eval1 = ws->push((size_t)k);
@@ -141,16 +150,18 @@ void spectral_dc(cublasHandle_t cublas, cusolverDnHandle_t cusolver, T *H, int n
     T *evec2 = ws->push((size_t)(n - k) * (n - k));
     spectral_dc(cublas, cusolver, H2, n - k, eval2, evec2, ws, stream);
 
-    // --- Merge eigenvalues into eval ---
-    // TODO: merge eval1 / eval2 ascending (small CPU merge after device→host)
+    // --- Merge eigenvalues: eval2 (< μ) first, eval1 (> μ) second → ascending ---
+    int m = n - k;
+    CUDA_CHECK(
+        cudaMemcpyAsync(eval, eval2, (size_t)m * sizeof(T), cudaMemcpyDeviceToDevice, stream));
+    CUDA_CHECK(
+        cudaMemcpyAsync(eval + m, eval1, (size_t)k * sizeof(T), cudaMemcpyDeviceToDevice, stream));
 
-    // --- Back-transform eigenvectors ---
+    // --- Back-transform eigenvectors: evec = [Q2·evec2 | Q1·evec1] ---
     kernels::sdc_combine(cublas, Q1, Q2, evec1, evec2, evec, n, k, stream);
 
     // Free everything allocated at this level in one shot.
-    // tau_P, B (Q), H1, H2, eval1, evec1, eval2, evec2 all fall above lvl.
     ws->reset(lvl);
-    (void)tau_P; // used via ws->push, pointer kept for clarity
 }
 
 } // namespace

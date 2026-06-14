@@ -137,7 +137,7 @@ class QdwhGPU : public ::testing::Test {
         CUDA_CHECK(
             cudaMemcpy(dB, hB.data(), (size_t)n * n * sizeof(double), cudaMemcpyHostToDevice));
         auto ws = cuev::workspace_alloc<double>(cusolver, n, stream);
-        cuev::qdwh_sign(cublas, cusolver, dB, n, &ws, stream);
+        cuev::kernels::qdwh_sign(cublas, cusolver, dB, n, &ws, stream);
         CUDA_CHECK(cudaStreamSynchronize(stream));
         std::vector<double> hS(n * n);
         CUDA_CHECK(

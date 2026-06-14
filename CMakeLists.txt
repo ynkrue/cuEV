@@ -91,6 +91,8 @@ target_link_libraries(cuDebug PRIVATE cuev CUDA::cudart CUDA::cublas CUDA::cusol
 # Unit / integration test suite (GTest runner)
 add_executable(cuTest
   test/test_qdwh.cu
+  test/test_sdc.cu
+  test/test_solver.cu
 )
 target_link_libraries(cuTest PRIVATE cuev GTest::gtest_main CUDA::cublas CUDA::cusolver)
 set_target_properties(cuTest PROPERTIES CUDA_SEPARABLE_COMPILATION ON)

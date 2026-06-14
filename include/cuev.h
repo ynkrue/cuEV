@@ -9,6 +9,7 @@
  */
 
 #pragma once
+#include "workspace.h"
 #include <cuda_runtime.h>
 
 namespace cuev {

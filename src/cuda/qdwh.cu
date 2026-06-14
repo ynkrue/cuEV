@@ -23,6 +23,7 @@
 #include <cublas_v2.h>
 #include <cuda.h>
 #include <cusolverDn.h>
+#include <limits>
 
 // =============================================================================
 // Device kernels
@@ -109,60 +110,78 @@ namespace {
 // Compute QDWH iteration coefficients from current l (lower bound on σ_min,
 // normalised so σ_max ≈ 1). Returns a, b, c for the update:
 //   X ← (b/c)X + coeff · Q₁Q₂ᵀ,  coeff = (a − b/c)/√c
-// Reference: Nakatsukasa & Higham, SISC 2010, Algorithm 4.1.
+// Reference: Nakatsukasa & Higham, SISC 2013, Eq. (3.4)–(3.5).
+//
+// NOTE the grouping of the second term: a = √(1+d) + ½·√(8 − 4d + …).
+// Writing it as √(½·(…)) instead loses cubic convergence — the map's fixed
+// point at 1 then has g'(1) ≈ 0.03 (linear), capping accuracy at ~1e-9 in 8
+// iterations rather than reaching machine precision.
 template <typename T> static void qdwh_coeffs(T &l, T &a, T &b, T &c) {
     T d = std::cbrt(T(4) * (T(1) - l * l) / std::pow(l, 4));
     a = std::sqrt(T(1) + d) +
-        std::sqrt(0.5 * (T(8) - T(4) * d + T(8) * (T(2) - l * l) / (l * l * std::sqrt(T(1) + d))));
-    b = 0.25 * (a - T(1)) * (a - T(1));
+        T(0.5) * std::sqrt(T(8) - T(4) * d + T(8) * (T(2) - l * l) / (l * l * std::sqrt(T(1) + d)));
+    b = T(0.25) * (a - T(1)) * (a - T(1));
     c = a + b - T(1);
     l = l * (a + b * l * l) / (T(1) + c * l * l);
 }
 
 } // namespace
 
+namespace kernels {
+
 // =============================================================================
 // qdwh_sign
 // =============================================================================
 
 template <typename T>
-void qdwh_sign(cublasHandle_t cublas, cusolverDnHandle_t cusolver, T *B, int n,
+void qdwh_sign(cublasHandle_t cublas_h, cusolverDnHandle_t cusolver_h, T *B, int n,
                SolverWorkspace<T> *ws, cudaStream_t stream) {
-    // W (2n×n) and tau (n) come from the pre-allocated workspace — no allocation here.
     T *W = ws->qdwh_W;
     T *tau = ws->qdwh_tau;
 
-    // Normalise: B ← B / ‖B‖_F  so that σ_max ≈ 1.
-    // TODO: cublas::nrm2 on B as a flat n²-vector, then cublas::scal
+    // Normalise: B ← B / ‖B‖_F.  ‖B‖_F ≥ ‖B‖_2 = σ_max, so σ_max(B) ≤ 1 after
+    // scaling — the precondition for QDWH convergence.
+    T h_norm;
+    cuev::cublas::nrm2(cublas_h, n * n, B, 1, &h_norm);
+    T inv_norm = T(1) / h_norm;
+    cuev::cublas::scal(cublas_h, n * n, &inv_norm, B, 1);
 
-    // Initial lower bound on σ_min (safe underestimate).
-    // TODO: estimate l₀ from ‖B‖₁ · ‖B‖_∞ or use 1/√n
-    T l = T(0);
+    // l = lower bound on σ_min of the scaled matrix. QDWH needs l ≤ σ_min for the
+    // iteration to sharpen *every* singular value to 1; cubic convergence then
+    // reaches full accuracy in ≤6 iterations even from l ≈ machine epsilon.
+    // (A larger guess such as 1/√n over-estimates σ_min and leaves singular values
+    // near the split point μ under-resolved — modes there get misassigned.)
+    T l = std::numeric_limits<T>::epsilon();
 
-    constexpr int MAX_ITER = 8;
+    constexpr int MAX_ITER = 6;
     for (int iter = 0; iter < MAX_ITER; ++iter) {
         T a, b, c;
         qdwh_coeffs(l, a, b, c);
 
-        // Build W = [√c · B ; I_n]
-        // TODO: cublas::copy + cublas::scal for top half, then:
-        kernels::qdwh_eye(W, n, stream);
+        // W = [√c · B ; I_n]
+        T scale = std::sqrt(c);
+        T zero = T(0);
+        cuev::cublas::geam(cublas_h, CUBLAS_OP_N, CUBLAS_OP_N, n, n, &scale, B, n, &zero, W, 2 * n,
+                           W, 2 * n);
+        qdwh_eye(W, n, stream);
 
-        // Thin QR of W (2n×n): W = Q · R
-        cusolver::geqrf(cusolver, 2 * n, n, W, 2 * n, tau, ws, stream);
-        // Materialise Q (2n×n) in W
-        cusolver::orgqr(cusolver, 2 * n, n, n, W, 2 * n, tau, ws, stream);
+        // QR of W (2n×n): W = Q · R
+        cuev::cusolver::geqrf(cusolver_h, 2 * n, n, W, 2 * n, tau, ws, stream);
+        cuev::cusolver::orgqr(cusolver_h, 2 * n, n, n, W, 2 * n, tau, ws, stream);
 
-        // Q₁ = W[0:n, :], Q₂ = W[n:2n, :]  (contiguous in column-major W)
-        // Update: B ← (b/c)·B + (a − b/c)/√c · Q₁·Q₂ᵀ
-        // TODO: cublas::gemm for Q₁Q₂ᵀ, then cublas::geam for linear combination
+        // Q₁ = W[0:n, :], Q₂ = W[n:2n, :]
+        // B ← (b/c)·B + (a − b/c)/√c · Q₁·Q₂ᵀ
+        T bc = b / c;
+        T coeff = (a - bc) / scale;
+        T one = T(1);
 
-        kernels::qdwh_symmetrize(B, n, stream);
+        T *Q1 = W;
+        T *Q2 = W + n; // W[n:2n, :]
+        cuev::cublas::scal(cublas_h, n * n, &bc, B, 1);
+        cuev::cublas::gemm(cublas_h, CUBLAS_OP_N, CUBLAS_OP_T, n, n, n, &coeff, Q1, 2 * n, Q2,
+                           2 * n, &one, B, n);
+        qdwh_symmetrize(B, n, stream);
 
-        // TODO: update l using QDWH recurrence
-        (void)a;
-        (void)b;
-        (void)c;
         if (l >= T(1) - T(1e-14)) break;
     }
 
@@ -177,4 +196,5 @@ template void qdwh_sign<float>(cublasHandle_t, cusolverDnHandle_t, float *, int,
 template void qdwh_sign<double>(cublasHandle_t, cusolverDnHandle_t, double *, int,
                                 SolverWorkspace<double> *, cudaStream_t);
 
+} // namespace kernels
 } // namespace cuev

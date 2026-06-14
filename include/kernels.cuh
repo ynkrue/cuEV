@@ -27,11 +27,13 @@
 
 #pragma once
 #include "common.h"
+#include "workspace.h"
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <cusolverDn.h>
 
 namespace cuev {
+
 namespace kernels {
 
 // =============================================================================
@@ -98,21 +100,6 @@ template <typename T> void qdwh_symmetrize(T *A, int n, cudaStream_t stream);
 template <typename T> T sdc_trace(const T *A, int n, cudaStream_t stream);
 
 /**
- * @brief Estimate the rank of the spectral projector from its QR diagonal.
- *
- * After QR of the projector P = (I + sign(B)) / 2, the diagonal entries
- * of R are approximately 0 or 1. Counts entries with |R[i,i]| > threshold
- * to determine the split size k.
- *
- * @tparam T         float or double
- * @param[in]  R     n×n upper-triangular QR factor, column-major
- * @param[in]  n     matrix dimension
- * @param[in]  stream CUDA stream (synchronised internally before return)
- * @return     number of diagonal entries above threshold — the split size k
- */
-template <typename T> int sdc_rank(const T *R, int n, cudaStream_t stream);
-
-/**
  * @brief Form the two subproblems: H₁ = Q₁ᵀHQ₁ and H₂ = Q₂ᵀHQ₂.
  *
  * Q₁ (n×k) and Q₂ (n×(n−k)) are the orthonormal bases for the two
@@ -132,7 +119,7 @@ template <typename T> int sdc_rank(const T *R, int n, cudaStream_t stream);
  */
 template <typename T>
 void sdc_split(cublasHandle_t cublas, const T *H, const T *Q1, const T *Q2, T *H1, T *H2, int n,
-               int k, cudaStream_t stream);
+               int k, SolverWorkspace<T> *ws, cudaStream_t stream);
 
 /**
  * @brief Combine sub-eigenvectors into the full eigenvector matrix.
@@ -153,133 +140,18 @@ void sdc_split(cublasHandle_t cublas, const T *H, const T *Q1, const T *Q2, T *H
  * @param[out] evec    n×n output eigenvector matrix, column-major, columns = eigenvectors
  * @param[in]  n       global dimension
  * @param[in]  k       split size
+ * @param[in]  ws      workspace for temporary buffers (push/reset, no net allocation)
  * @param[in]  stream  CUDA stream
  */
 template <typename T>
 void sdc_combine(cublasHandle_t cublas, const T *Q1, const T *Q2, const T *evec1, const T *evec2,
                  T *evec, int n, int k, cudaStream_t stream);
 
-} // namespace kernels
-
-// =============================================================================
-// Solver workspace
-// =============================================================================
-
-/// Base-case threshold for spectral_dc recursion.
-constexpr int SDC_BASE_N = 256;
-
-/**
- * @brief Single-allocation workspace for the entire spectral D&C eigensolver.
- *
- * Created once in symm_eig_solve, threaded through all recursion levels.
- * workspace_alloc<T> issues one cudaMalloc for the combined pool; workspace_free<T>
- * issues the matching single cudaFree.  Zero dynamic allocation in the hot path.
- *
- * Memory layout (contiguous, 256-byte aligned regions):
- *
- *   cuSOLVER scratch:
- *     geqrf_buf    geqrf(2n, n)     — reused for geqrf(n, n), which is smaller
- *     orgqr_buf    orgqr(2n, n)     — reused for orgqr(n, n)
- *     syevd_buf    syevd(SDC_BASE_N)
- *     d_info       1 × int
- *
- *   QDWH per-call scratch (fixed size, reused across all QDWH calls):
- *     qdwh_W       2n × n  (QR work matrix)
- *     qdwh_tau     n       (Householder scalars)
- *
- *   Data pool (mark/reset bump allocator for variable-lifetime data):
- *     3n² elements of T   — covers B, Q, H1/H2, evec1/2, eval1/2 across
- *                           all recursion levels; see workspace_alloc for derivation.
- *
- * @tparam T  float or double
- */
-template <typename T> struct SolverWorkspace {
-    // cuSOLVER scratch
-    T *geqrf_buf;
-    int geqrf_lwork;
-    T *orgqr_buf;
-    int orgqr_lwork;
-    T *syevd_buf;
-    int syevd_lwork;
-    int *d_info;
-
-    // QDWH scratch (2n×n and n)
-    T *qdwh_W;
-    T *qdwh_tau;
-
-    // Data pool — mark/reset bump allocator
-    T *data;
-    size_t data_cap;  ///< total capacity in elements of T
-    size_t data_used; ///< current stack pointer in elements of T
-
-    // Single backing allocation owned by this struct
-    void *pool;
-
-    // -----------------------------------------------------------------------
-    // Stack allocator — inline, no external dependencies
-    // -----------------------------------------------------------------------
-
-    /// Allocate @p n elements from the data pool; returns device pointer.
-    inline T *push(size_t n) {
-        T *ptr = data + data_used;
-        data_used += n;
-        return ptr;
-    }
-
-    /// Save the current stack position for a later reset().
-    inline size_t mark() const {
-        return data_used;
-    }
-
-    /// Restore the stack to a position saved by mark(), freeing everything above.
-    inline void reset(size_t saved) {
-        data_used = saved;
-    }
-};
-
-/**
- * @brief Query cuSOLVER buffer sizes and issue one cudaMalloc for all regions.
- *
- * Data-pool budget derivation: at each recursion level m, peak live data is
- *   B(m²) + H1 + H2 + evec1 + evec2 ≈ 3m²
- * giving a geometric series M(n) ≈ 3n² · (4/3) = 4n². We allocate 3n² for
- * the data pool (slightly under the theoretical bound; the remainder is
- * covered by the cuSOLVER and QDWH regions that are reused, not stacked).
- *
- * @tparam T         float or double
- * @param[in] h      cuSOLVER handle (buffer-size queries only; no GPU work)
- * @param[in] n      root problem dimension
- * @param[in] stream CUDA stream (unused; reserved for future async alloc)
- */
-template <typename T>
-SolverWorkspace<T> workspace_alloc(cusolverDnHandle_t h, int n, cudaStream_t stream);
-
-/**
- * @brief Free the workspace pool (single cudaFree).
- *
- * @tparam T  float or double
- * @param[in,out] ws  workspace; all pointers zeroed on return
- */
-template <typename T> void workspace_free(SolverWorkspace<T> &ws);
-
-// =============================================================================
-// QDWH sign function
-// =============================================================================
-
 /**
  * @brief Compute the matrix sign function of a symmetric matrix via QDWH.
  *
  * Overwrites B with sign(B) using the QR-based QDWH polar iteration
  * (Nakatsukasa & Higham 2010). Converges in ≤ 8 iterations.
- *
- * Each iteration:
- *   1. Build W = [√cₖ · B ; I]  (2n×n)  — W allocated with cudaMallocAsync
- *   2. Thin QR: W = Q · R               — uses ws->geqrf_qdwh / ws->orgqr_qdwh
- *   3. B ← (bₖ/cₖ) B + coeff · Q₁ · Q₂ᵀ
- *   4. Symmetrize B
- *
- * Coefficients aₖ, bₖ, cₖ are computed on the CPU each iteration from
- * the current lower bound on the smallest singular value.
  *
  * @tparam T         float or double
  * @param[in]     cublas    cuBLAS handle
@@ -292,6 +164,8 @@ template <typename T> void workspace_free(SolverWorkspace<T> &ws);
 template <typename T>
 void qdwh_sign(cublasHandle_t cublas, cusolverDnHandle_t cusolver, T *B, int n,
                SolverWorkspace<T> *ws, cudaStream_t stream);
+
+} // namespace kernels
 
 // =============================================================================
 // cuBLAS type-dispatching wrappers  (cuev::cublas)
