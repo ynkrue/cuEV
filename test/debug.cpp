@@ -10,7 +10,7 @@
  */
 
 #include "common.h"
-#include "kernels.cuh"
+#include "cuev.h"
 #include <iomanip>
 #include <iostream>
 #include <vector>
@@ -44,7 +44,7 @@ int main() {
     cudaStream_t stream;
     CUDA_CHECK(cudaStreamCreate(&stream));
 
-    cuev::solve<double>(dA, N, d_eval, d_evec, stream);
+    cuev::symm_eig_solve<double>(dA, N, d_eval, d_evec, stream);
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
     std::vector<double> h_eval(N), h_evec(N * N);
@@ -57,7 +57,7 @@ int main() {
     }
     std::cout << " ]\n\n";
 
-    print_matrix("eigenvectors (rows)", h_evec.data(), N, N);
+    print_matrix("eigenvectors (cols, col-major)", h_evec.data(), N, N);
 
     CUDA_CHECK(cudaFree(dA));
     CUDA_CHECK(cudaFree(d_eval));

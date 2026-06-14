@@ -1,83 +1,86 @@
 # cuEV — CUDA Eigensolver
 
-Custom CUDA implementation of a real symmetric dense eigensolver: `A v = λv`.
+Real symmetric dense eigensolver on NVIDIA GPUs.
 
-Public entry point:
 ```cpp
-cuev::solve<T>(T *H, int n, T *eval, T *evec, cudaStream_t stream);
+cuev::symm_eig_solve<T>(T *H, int n, T *eval, T *evec, cudaStream_t stream);
 ```
-`H` is an n×n real symmetric matrix (row-major, device pointer). On return, `eval` holds eigenvalues in ascending order and `evec` holds the corresponding eigenvectors as rows.
+
+`H` — n×n real symmetric, row-major, device pointer, overwritten on return.
+`eval` — eigenvalues ascending, length n.
+`evec` — eigenvectors as rows, n×n row-major.
 
 ## Algorithm
 
+Spectral divide-and-conquer via QDWH polar iteration (Nakatsukasa, Bai, Gygi 2013). Entirely BLAS-3 — no tridiagonalization, no sequential bottleneck.
+
 ```
-solve<T>
-├── tridiag_hh        H → T       Householder tridiagonalization (n−1 steps)
-├── tridiag_eig       T → Λ, Qᵀ  divide-and-conquer STEDC
-└── tridiag_hh_back   evec = Q·Qᵀ apply stored Householder projections
+symm_eig_solve
+└── spectral_dc (recursive)
+    ├── n ≤ 256   →  cuSOLVER dsyevd / ssyevd
+    └── n  > 256
+        ├── μ ← trace(H) / n                   split point
+        ├── sign(H − μI)                        QDWH polar iteration (≤ 8 iters)
+        │     each iter: scale + QR + GEMM
+        ├── P = (I + sign) / 2                  spectral projector
+        ├── QR(P)  →  Q₁ (n×k),  Q₂ (n×(n−k)) orthonormal bases
+        ├── H₁ = Q₁ᵀHQ₁,  H₂ = Q₂ᵀHQ₂        subproblems
+        ├── spectral_dc(H₁),  spectral_dc(H₂)  recurse
+        └── evec = blkdiag(evec₁, evec₂) · [Q₁|Q₂]ᵀ
 ```
 
-Each Householder step k reduces column k of the trailing submatrix and stores the reflection vector implicitly in the zeroed-out lower triangle of H. The accumulated product Q = P₀·P₁···P_{n-3} is only materialized during the back-transformation.
-
-The D&C split: `T = diag(T₁, T₂) + β·vvᵀ`, solve halves recursively, merge via the rank-1 secular equation `1 + ρ·Σ zᵢ²/(dᵢ−λ) = 0`.
-
-## Roadmap
-
-| Phase | Goal | Status |
-|---|---|---|
-| 1 | Custom kernels — everything from scratch | **in progress** |
-| 2 | cuBLAS / cuSOLVER-backed reference implementations | planned |
-| 3 | Distributed (cuBLASMp, NCCL) | planned |
-
-Phase 1 is the learning and research phase. Phase 2 adds library-backed implementations of each operation as correctness references and performance baselines. Phase 3 extends to multi-GPU.
+All GEMMs and QR factorizations go through cuBLAS / cuSOLVER. Custom CUDA kernels handle the small fused operations: diagonal shift, identity fill, symmetrize, trace reduction, projector rank estimation.
 
 ## Build
 
 ```bash
-make            # build shared library → build/libcuev.so
-make bench      # build benchmark binary → build/cuBench
-make debug      # build debug binary → build/cuDebug  (-DDEBUG)
-make clean
+cmake -B build -DCMAKE_CUDA_ARCHITECTURES=80
+cmake --build build
 ```
 
-Override architecture or CUDA path:
+Override architecture:
+
 ```bash
-make ARCH=sm_90a
-make CUDA_HOME=/path/to/cuda
+cmake -B build -DCMAKE_CUDA_ARCHITECTURES=90a
 ```
 
-Default target is `sm_80` (A100). Primary development target is `sm_90a` (H100/H200).
+Multi-GPU (Phase 3, requires MPI + cuBLASMp):
+
+```bash
+cmake -B build -DCUEV_ENABLE_MP=ON
+```
 
 ## Binaries
 
 | Binary | Source | Purpose |
 |---|---|---|
-| `cuBench` | `bench/bench.cpp` | Benchmark GEMV / GEMM / transpose vs cuBLAS |
-| `cuDebug` | `test/debug.cpp` | Run `solve<double>` on a small matrix, print eigenvalues and eigenvectors |
+| `cuBench` | `bench/bench.cpp` | `symm_eig_solve` vs cuSOLVER `dsyevd` / `ssyevd` |
+| `cuTest` | `test/debug.cpp` | Smoke test on a 4×4 matrix |
 
-## File structure
+## File Structure
 
 ```
 cuEV/
-├── Makefile
-├── Doxyfile
+├── CMakeLists.txt
 ├── include/
-│   ├── common.h            CUDA_CHECK / CUBLAS_CHECK / div_up / BenchArgs / debug helpers
-│   └── kernels.cuh         all kernel declarations — single interface file
+│   ├── cuev.h          public API  (symm_eig_solve)
+│   ├── cuev_mp.h       multi-GPU API placeholder
+│   ├── kernels.cuh     kernel + wrapper declarations, SolverWorkspace
+│   └── common.h        CUDA_CHECK / CUBLAS_CHECK / CUSOLVER_CHECK / block_reduce_sum
 └── src/
-    └── custom/             Phase 1 — custom kernels
-        ├── util.cu         fill, copy, transpose
-        ├── gemv.cu         gemv_{gmem,smem}
-        ├── gemm.cu         gemm_{gmem,smem,tiled,warptile}
-        ├── householder.cu  hh_{reflect,trail_matvec,ortho,update,wy_build,wy_apply}
-        ├── tridiag.cu      eig_{leaf,split,merge}
-        └── solver.cu       solve<T> + tridiag_{hh,eig,hh_back}
+    ├── cuda/           single-GPU solver
+    │   ├── cublas.cu   cuev::cublas  — type-dispatching cuBLAS wrappers
+    │   ├── cusolver.cu cuev::cusolver — cuSOLVER wrappers (workspace-aware)
+    │   ├── qdwh.cu     qdwh_sign  — QDWH polar iteration
+    │   ├── sdc.cu      sdc_trace / sdc_rank / sdc_split / sdc_combine
+    │   └── solver.cu   spectral_dc + symm_eig_solve + workspace_alloc/free
+    └── mp/             multi-GPU (Phase 3, placeholder)
 ```
 
-## Documentation
+## Roadmap
 
-```bash
-doxygen Doxyfile    # output → docs/html/index.html
-```
-
-API reference: [cuev::kernels](@ref cuev::kernels) — all kernel launchers, [cuev::solve](@ref cuev::solve) — public entry point.
+| Phase | Goal | Status |
+|---|---|---|
+| 1 | Custom STEDC eigensolver (learning) | done on `main` branch |
+| 2 | Spectral D&C via QDWH, single GPU | **in progress** |
+| 3 | Spectral D&C via QDWH, multi-GPU (cuBLASMp / NCCL) | planned |
