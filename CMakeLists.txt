@@ -98,6 +98,10 @@ if(CUEV_ENABLE_MP)
     add_executable(cuBenchMp bench/bench_mp.cpp)
     target_link_libraries(cuBenchMp PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
   endif()
+
+  # Multi-GPU correctness tests (MPI-based, not GTest — MPI+GTest don't mix)
+  add_executable(cuTestMp test/test_mp.cpp)
+  target_link_libraries(cuTestMp PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
 endif()
 
 # =============================================================================
