@@ -5,6 +5,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Default to an optimized build: enables -O3 and defines NDEBUG, which compiles
+# out the synchronizing hot-path checks (see cusolver.cu check_info). Configure
+# with -DCMAKE_BUILD_TYPE=Debug to re-enable them.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 # CUDA architecture
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES 80)
@@ -118,15 +125,18 @@ if(CLANG_FORMAT)
 endif()
 
 # =============================================================================
-# Doxygen
+# Doxygen  (-DCUEV_BUILD_DOCS=ON)
 # =============================================================================
-find_package(Doxygen QUIET OPTIONAL_COMPONENTS dot)
-if(DOXYGEN_FOUND AND DOXYGEN_VERSION)
-  set(DOXYGEN_PROJECT_NAME        "cuEV")
-  set(DOXYGEN_PROJECT_BRIEF       "CUDA symmetric dense eigensolver")
-  set(DOXYGEN_EXTRACT_ALL         YES)
-  set(DOXYGEN_BUILTIN_STL_SUPPORT YES)
-  set(DOXYGEN_WARN_IF_UNDOCUMENTED NO)
-  set(DOXYGEN_OUTPUT_DIRECTORY    "${CMAKE_BINARY_DIR}/docs")
-  doxygen_add_docs(docs include src)
+option(CUEV_BUILD_DOCS "Build Doxygen documentation" OFF)
+if(CUEV_BUILD_DOCS)
+  find_package(Doxygen QUIET OPTIONAL_COMPONENTS dot)
+  if(DOXYGEN_FOUND AND DOXYGEN_VERSION)
+    set(DOXYGEN_PROJECT_NAME        "cuEV")
+    set(DOXYGEN_PROJECT_BRIEF       "CUDA symmetric dense eigensolver")
+    set(DOXYGEN_EXTRACT_ALL         YES)
+    set(DOXYGEN_BUILTIN_STL_SUPPORT YES)
+    set(DOXYGEN_WARN_IF_UNDOCUMENTED NO)
+    set(DOXYGEN_OUTPUT_DIRECTORY    "${CMAKE_BINARY_DIR}/docs")
+    doxygen_add_docs(docs include src)
+  endif()
 endif()

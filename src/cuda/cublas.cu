@@ -30,6 +30,15 @@ void geam(cublasHandle_t h, cublasOperation_t transa, cublasOperation_t transb, 
 }
 
 template <typename T>
+void symm(cublasHandle_t h, cublasSideMode_t side, cublasFillMode_t uplo, int m, int n,
+          const T *alpha, const T *A, int lda, const T *B, int ldb, const T *beta, T *C, int ldc) {
+    if constexpr (std::is_same_v<T, float>)
+        CUBLAS_CHECK(cublasSsymm(h, side, uplo, m, n, alpha, A, lda, B, ldb, beta, C, ldc));
+    else
+        CUBLAS_CHECK(cublasDsymm(h, side, uplo, m, n, alpha, A, lda, B, ldb, beta, C, ldc));
+}
+
+template <typename T>
 void syrk(cublasHandle_t h, cublasFillMode_t uplo, cublasOperation_t trans, int n, int k,
           const T *alpha, const T *A, int lda, const T *beta, T *C, int ldc) {
     if constexpr (std::is_same_v<T, float>)
@@ -76,6 +85,8 @@ template <typename T> void nrm2(cublasHandle_t h, int n, const T *x, int incx, T
                           const T *, const T *, int, const T *, int, const T *, T *, int);         \
     template void geam<T>(cublasHandle_t, cublasOperation_t, cublasOperation_t, int, int,          \
                           const T *, const T *, int, const T *, const T *, int, T *, int);         \
+    template void symm<T>(cublasHandle_t, cublasSideMode_t, cublasFillMode_t, int, int, const T *, \
+                          const T *, int, const T *, int, const T *, T *, int);                    \
     template void syrk<T>(cublasHandle_t, cublasFillMode_t, cublasOperation_t, int, int,           \
                           const T *, const T *, int, const T *, T *, int);                         \
     template void trsm<T>(cublasHandle_t, cublasSideMode_t, cublasFillMode_t, cublasOperation_t,   \

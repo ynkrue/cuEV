@@ -19,7 +19,13 @@ namespace cuev {
 namespace cusolver {
 
 namespace {
-inline void check_info(int *d_info, const char *name, cudaStream_t stream) {
+// Verify a cuSOLVER routine's info flag. This forces a stream sync + D2H copy,
+// so it runs only in debug builds — in release (NDEBUG) it compiles to nothing,
+// keeping the hot path free of host round-trips. A genuine factorisation failure
+// (e.g. non-SPD potrf) still surfaces later via wrong results / a CUDA error.
+inline void check_info([[maybe_unused]] int *d_info, [[maybe_unused]] const char *name,
+                       [[maybe_unused]] cudaStream_t stream) {
+#ifndef NDEBUG
     CUDA_CHECK(cudaStreamSynchronize(stream));
     int h_info = 0;
     CUDA_CHECK(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
@@ -27,6 +33,7 @@ inline void check_info(int *d_info, const char *name, cudaStream_t stream) {
         fprintf(stderr, "cuSOLVER %s failed: info = %d\n", name, h_info);
         exit(1);
     }
+#endif
 }
 } // namespace
 

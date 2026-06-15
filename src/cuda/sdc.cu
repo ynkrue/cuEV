@@ -61,17 +61,19 @@ void sdc_split(cublasHandle_t cublas, const T *H, const T *Q1, const T *Q2, T *H
                int k, SolverWorkspace<T> *ws, cudaStream_t stream) {
     // H₁ = Q₁ᵀ H Q₁:  tmp (n×k) = H (n×n) · Q₁ (n×k),  H₁ (k×k) = Q₁ᵀ (k×n) · tmp (n×k)
     // H₂ = Q₂ᵀ H Q₂:  tmp (n×m) = H (n×n) · Q₂ (n×m),  H₂ (m×m) = Q₂ᵀ (m×n) · tmp (n×m)
+    // H is symmetric → the H·Q product uses symm (half the flops of gemm).
     T one = T(1);
     T zero = T(0);
     int m = n - k;
+    cublasFillMode_t uplo = CUBLAS_FILL_MODE_LOWER;
     size_t mark = ws->mark();
     T *tmp = ws->push((size_t)n * k);
-    cublas::gemm(cublas, CUBLAS_OP_N, CUBLAS_OP_N, n, k, n, &one, H, n, Q1, n, &zero, tmp, n);
+    cublas::symm(cublas, CUBLAS_SIDE_LEFT, uplo, n, k, &one, H, n, Q1, n, &zero, tmp, n);
     cublas::gemm(cublas, CUBLAS_OP_T, CUBLAS_OP_N, k, k, n, &one, Q1, n, tmp, n, &zero, H1, k);
     ws->reset(mark);
 
     tmp = ws->push((size_t)n * m);
-    cublas::gemm(cublas, CUBLAS_OP_N, CUBLAS_OP_N, n, m, n, &one, H, n, Q2, n, &zero, tmp, n);
+    cublas::symm(cublas, CUBLAS_SIDE_LEFT, uplo, n, m, &one, H, n, Q2, n, &zero, tmp, n);
     cublas::gemm(cublas, CUBLAS_OP_T, CUBLAS_OP_N, m, m, n, &one, Q2, n, tmp, n, &zero, H2, m);
     ws->reset(mark);
 }

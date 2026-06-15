@@ -190,6 +190,11 @@ template <typename T>
 void geam(cublasHandle_t h, cublasOperation_t transa, cublasOperation_t transb, int m, int n,
           const T *alpha, const T *A, int lda, const T *beta, const T *B, int ldb, T *C, int ldc);
 
+/// C ← α·A·B + β·C  with A symmetric (side=left) — only @p uplo triangle of A read
+template <typename T>
+void symm(cublasHandle_t h, cublasSideMode_t side, cublasFillMode_t uplo, int m, int n,
+          const T *alpha, const T *A, int lda, const T *B, int ldb, const T *beta, T *C, int ldc);
+
 /// C ← α·op(A)·op(A)ᵀ + β·C  (only @p uplo triangle of C is referenced/written)
 template <typename T>
 void syrk(cublasHandle_t h, cublasFillMode_t uplo, cublasOperation_t trans, int n, int k,
