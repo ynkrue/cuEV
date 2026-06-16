@@ -63,8 +63,7 @@ void spectral_dc(cublasHandle_t cublas, cusolverDnHandle_t cusolver, T *H, int n
     kernels::qdwh_shift(P, -half, n, stream);
 
     // --- Split size k = rank(P) ---
-    // P is an orthogonal projector: eigenvalues are exactly 1 (×k) and 0 (×n−k),
-    // hence trace(P) = rank(P) = k exactly.
+    // P as orthogonal projector implies trace(P) = rank(P) = k.
     int k = (int)std::lround(kernels::sdc_trace(P, n, stream));
 
     // --- QR(P) → Q; Q1 = Q[:,0:k], Q2 = Q[:,k:n] ---

@@ -202,33 +202,26 @@ static void qdwh_step_chol(cublasHandle_t cublas_h, cusolverDnHandle_t cusolver_
 template <typename T>
 void qdwh_sign(cublasHandle_t cublas_h, cusolverDnHandle_t cusolver_h, T *B, int n,
                SolverWorkspace<T> *ws, cudaStream_t stream) {
-    // Normalise: B ← B / ‖B‖_F.  ‖B‖_F ≥ ‖B‖_2 = σ_max, so σ_max(B) ≤ 1 after
-    // scaling — the precondition for QDWH convergence, and it guarantees
+    // Normalise: B ← B / ‖B‖_F such that σ_max(B) ≤ 1. This guarantees
     // κ(I + c·BᵀB) ≤ 1 + c so the c ≤ CHOL_SWITCH test below is a safe gate.
     T h_norm;
     cuev::cublas::nrm2(cublas_h, n * n, B, 1, &h_norm);
     T inv_norm = T(1) / h_norm;
     cuev::cublas::scal(cublas_h, n * n, &inv_norm, B, 1);
 
-    // l = lower bound on σ_min of the scaled matrix. QDWH needs l ≤ σ_min for the
-    // iteration to sharpen *every* singular value to 1; cubic convergence then
-    // reaches full accuracy in ≤6 iterations even from l ≈ machine epsilon.
-    // (A larger guess such as 1/√n over-estimates σ_min and leaves singular values
-    // near the split point μ under-resolved — modes there get misassigned.)
+    // c_k decreases monotonically, so use the cheaper Cholesky update stable
     T l = std::numeric_limits<T>::epsilon();
-
-    // c_k decreases monotonically (huge when l≈0, → 3 as l→1). Use the cheap
-    // Cholesky update once c drops below this; the first ~2 iterations stay on QR.
     constexpr T CHOL_SWITCH = T(100);
-
     constexpr int MAX_ITER = 6;
     for (int iter = 0; iter < MAX_ITER; ++iter) {
         T a, b, c;
         qdwh_coeffs(l, a, b, c);
 
         if (c > CHOL_SWITCH)
+            // QR for update: X ← (b/c)·X + (a − b/c)/√c · Q₁·Q₂ᵀ
             qdwh_step_qr(cublas_h, cusolver_h, B, n, a, b, c, ws, stream);
         else
+            // Cholesky for update: X ← (b/c)·X + (a − b/c)·X·Z⁻¹
             qdwh_step_chol(cublas_h, cusolver_h, B, n, a, b, c, ws, stream);
 
         qdwh_symmetrize(B, n, stream);
