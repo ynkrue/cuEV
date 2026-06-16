@@ -9,7 +9,7 @@
  *     sdc_            Spectral divide-and-conquer helpers  (src/cuda/sdc.cu)
  *
  *   cuev::cublas    Type-dispatching inline wrappers for cuBLAS:
- *                     gemm, geam, scal, copy, nrm2         (src/cuda/cublas.cu)
+ *                     gemm, symm, geam, scal, copy, nrm2   (src/cuda/cublas.cu)
  *
  *   cuev::cusolver  Type-dispatching inline wrappers for cuSOLVER:
  *                     geqrf, orgqr, syevd                  (src/cuda/cusolver.cu)
@@ -17,7 +17,7 @@
  *
  * All matrices are column-major unless documented otherwise.
  * Template parameter @p T is float or double throughout.
- * cuBLAS and cuSOLVER are column-major — callers must pass transposed arguments
+ * cuBLAS and cuSOLVER are column-major
  * where needed. All workspace buffers for cuSOLVER are allocated in SolverWorkspace
  * and passed to the wrappers.
  *
@@ -27,7 +27,7 @@
 
 #pragma once
 #include "common.h"
-#include "workspace.h"
+#include "cuda/workspace.h"
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <cusolverDn.h>

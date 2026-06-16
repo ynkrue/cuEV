@@ -19,7 +19,7 @@
  */
 
 #include "common.h"
-#include "kernels.cuh"
+#include "cuda/kernels.cuh"
 #include <cmath>
 #include <cublas_v2.h>
 #include <cuda.h>

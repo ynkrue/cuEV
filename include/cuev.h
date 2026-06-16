@@ -3,13 +3,17 @@
  * @brief  Public API for cuEV — single-GPU symmetric dense eigensolver.
  *
  * For multi-GPU usage see cuev_mp.h (requires -DCUEV_ENABLE_MP=ON).
+ * The performance is worse than cuSOLVER's dsyevd/ssyevd since cuEV has
+ * significantly more arithmetic intensity due to the use of QDWH polar iteration,
+ * but it is designed to scale to multi-GPU and multi-node systems, where other
+ * solver implementations typically fail to scale due to communication bottlenecks.
  *
  * @author  Yannik Rüfenacht
  * @date    2026-06
  */
 
 #pragma once
-#include "workspace.h"
+#include "cuda/workspace.h"
 #include <cuda_runtime.h>
 
 namespace cuev {
@@ -23,7 +27,6 @@ namespace cuev {
  *
  * Output convention: eigenvectors are stored as **columns** of @p evec (column-major),
  * i.e. `evec[j * n + i]` is the i-th component of the j-th eigenvector.
- * Directly compatible with cuSOLVER dsyevd/ssyevd column-major output.
  *
  * @tparam T      float or double
  * @param[in,out] H      n×n real symmetric matrix, column-major; overwritten on return

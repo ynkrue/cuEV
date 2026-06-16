@@ -40,7 +40,7 @@ option(CUEV_ENABLE_BENCH "Build benchmarks" ON)
 # =============================================================================
 # Dependencies
 # =============================================================================
-if (CUEV_ENABLE_TESTS)
+if(CUEV_ENABLE_TESTS AND NOT CUEV_ENABLE_MP)
   CPMAddPackage("gh:google/googletest#v1.14.0")
 endif()
 
@@ -57,28 +57,32 @@ if(CUEV_ENABLE_MP)
 endif()
 
 # =============================================================================
-# cuEV single-GPU library
+# cuEV GPU library
 # =============================================================================
-add_library(cuev SHARED
-  src/cuda/cublas.cu
-  src/cuda/cusolver.cu
-  src/cuda/qdwh.cu
-  src/cuda/sdc.cu
-  src/cuda/solver.cu
-)
-target_include_directories(cuev PUBLIC include)
-target_link_libraries(cuev PUBLIC CUDA::cublas CUDA::cusolver)
-set_target_properties(cuev PROPERTIES
-  CUDA_SEPARABLE_COMPILATION ON
-  POSITION_INDEPENDENT_CODE  ON
-)
-
-# =============================================================================
-# cuEV distributed library  (CUEV_ENABLE_MP=ON)
-# =============================================================================
-if(CUEV_ENABLE_MP)
+if(NOT CUEV_ENABLE_MP)
+  add_library(cuev SHARED
+    src/cuda/workspace.cu
+    src/cuda/cublas.cu
+    src/cuda/cusolver.cu
+    src/cuda/qdwh.cu
+    src/cuda/sdc.cu
+    src/cuda/solver.cu
+  )
+  target_include_directories(cuev PUBLIC include)
+  target_link_libraries(cuev PUBLIC CUDA::cublas CUDA::cusolver)
+  set_target_properties(cuev PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    POSITION_INDEPENDENT_CODE  ON
+  )
+else()
   add_library(cuev_mp SHARED
     src/mp/comm.cu
+    src/mp/workspace_mp.cu
+    src/mp/cublas_mp.cu
+    src/mp/cusolver_mp.cu
+    src/mp/qdwh_mp.cu
+    src/mp/sdc_mp.cu
+    src/mp/solver_mp.cu
   )
   target_include_directories(cuev_mp PUBLIC include)
   target_compile_definitions(cuev_mp PUBLIC CUEV_ENABLE_MP)
@@ -93,42 +97,43 @@ if(CUEV_ENABLE_MP)
     CUDA_SEPARABLE_COMPILATION ON
     POSITION_INDEPENDENT_CODE  ON
   )
-
-  if (CUEV_ENABLE_BENCH)
-    add_executable(cuBenchMp bench/bench_mp.cpp)
-    target_link_libraries(cuBenchMp PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
-  endif()
-
-  # Multi-GPU correctness tests (MPI-based, not GTest — MPI+GTest don't mix)
-  add_executable(cuTestMp test/test_mp.cpp)
-  target_link_libraries(cuTestMp PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
 endif()
 
 # =============================================================================
 # Benchmark
 # =============================================================================
-if (CUEV_ENABLE_BENCH)
-  add_executable(cuBench bench/bench.cpp)
-  target_link_libraries(cuBench PRIVATE cuev CUDA::cudart CUDA::cublas CUDA::cusolver)
+if(CUEV_ENABLE_BENCH)
+  if(NOT CUEV_ENABLE_MP)
+    add_executable(cuBench bench/bench.cpp)
+    target_link_libraries(cuBench PRIVATE cuev CUDA::cudart CUDA::cublas CUDA::cusolver)
+  else()
+    add_executable(cuBenchMp bench/bench_mp.cpp)
+    target_link_libraries(cuBenchMp PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
+  endif()
 endif()
 
 # =============================================================================
 # Tests
 # =============================================================================
 
-if (CUEV_ENABLE_TESTS)
-  enable_testing()
-  include(GoogleTest)
+if(CUEV_ENABLE_TESTS)
+  if(NOT CUEV_ENABLE_MP)
+    enable_testing()
+    include(GoogleTest)
 
-  # Unit / integration test suite
-  add_executable(cuTest
-  test/test_qdwh.cu
-  test/test_sdc.cu
-  test/test_solver.cu
-  )
-  target_link_libraries(cuTest PRIVATE cuev GTest::gtest_main CUDA::cublas CUDA::cusolver)
-  set_target_properties(cuTest PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-  gtest_discover_tests(cuTest)
+    # Unit / integration test suite
+    add_executable(cuTest
+    test/test_qdwh.cu
+    test/test_sdc.cu
+    test/test_solver.cu
+    )
+    target_link_libraries(cuTest PRIVATE cuev GTest::gtest_main CUDA::cublas CUDA::cusolver)
+    set_target_properties(cuTest PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+    gtest_discover_tests(cuTest)
+  else()
+    add_executable(cuTestMp test/test_mp.cpp)
+    target_link_libraries(cuTestMp PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
+  endif()
 endif()
 
 # =============================================================================

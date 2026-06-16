@@ -5,21 +5,21 @@
  * Implements ctx_init / ctx_finalize / grid_factor from comm.h.
  *
  * Communicator story on library version (cuBLASMp 0.4 / CAL 0.4):
- *   - NCCL  : our own collectives (e.g. the sdc_trace AllReduce). Bootstrapped
- *             with the canonical "broadcast a ncclUniqueId over MPI" handshake.
+ *   - NCCL  : our own collectives. Bootstrapped with the canonical
+ *             "broadcast a ncclUniqueId over MPI" handshake.
  *   - CAL   : required by cublasMpGridCreate / cusolverMpCreateDeviceGrid. CAL
  *             bootstraps from a user-provided MPI all-gather callback.
  *   Both are independent handles.
  *
- * Portability: newer cuBLASMp/cuSOLVERMp take an ncclComm_t directly and drop
- * CAL. TODO implment and guard that path.
+ * TODO Portability: newer cuBLASMp/cuSOLVERMp take an ncclComm_t directly and drop
+ * CAL.
  *
  * @author  Yannik Rüfenacht
  * @date    2026-06
  */
 
-#include "comm.h"
 #include "common.h"
+#include "mp/comm.h"
 
 #include <mpi.h>
 
@@ -79,12 +79,12 @@ void grid_factor(int world_size, int &nprow, int &npcol) {
 // ctx_init — collective bootstrap
 // =============================================================================
 void ctx_init(Context &ctx, int nb, int nprow, int npcol) {
-    // --- 1. MPI world ---
+    // MPI world
     MPI_CHECK(MPI_Comm_dup(MPI_COMM_WORLD, &ctx.comm));
     MPI_CHECK(MPI_Comm_rank(ctx.comm, &ctx.rank));
     MPI_CHECK(MPI_Comm_size(ctx.comm, &ctx.world_size));
 
-    // --- 2. Validate + map the process grid ---
+    // map the process grid
     if (nprow * npcol != ctx.world_size) {
         if (ctx.rank == 0)
             fprintf(stderr, "ctx_init: grid %dx%d = %d != world_size %d\n", nprow, npcol,
@@ -97,7 +97,7 @@ void ctx_init(Context &ctx, int nb, int nprow, int npcol) {
     ctx.prow = ctx.rank % nprow;
     ctx.pcol = ctx.rank / nprow;
 
-    // --- 3. Bind this rank to a GPU via its NODE-LOCAL rank ---
+    // Bind rank to a GPU via its NODE-LOCAL rank
     MPI_Comm node;
     MPI_CHECK(MPI_Comm_split_type(ctx.comm, MPI_COMM_TYPE_SHARED, ctx.rank, MPI_INFO_NULL, &node));
     int local_rank;
@@ -109,13 +109,13 @@ void ctx_init(Context &ctx, int nb, int nprow, int npcol) {
     CUDA_CHECK(cudaSetDevice(ctx.device));
     CUDA_CHECK(cudaStreamCreate(&ctx.stream));
 
-    // --- 4. NCCL: broadcast a uniqueId over MPI, then init all ranks ---
+    // NCCL broadcast a uniqueId over MPI, then init all ranks
     ncclUniqueId id;
     if (ctx.rank == 0) NCCL_CHECK(ncclGetUniqueId(&id));
     MPI_CHECK(MPI_Bcast(&id, sizeof(id), MPI_BYTE, 0, ctx.comm));
     NCCL_CHECK(ncclCommInitRank(&ctx.nccl, ctx.world_size, id, ctx.rank));
 
-    // --- 5. CAL: bootstrap over MPI ---
+    // CAL: bootstrap over MPI
     cal_comm_create_params_t p{};
     p.allgather = mpi_allgather;
     p.req_test = mpi_req_test;
@@ -126,7 +126,7 @@ void ctx_init(Context &ctx, int nb, int nprow, int npcol) {
     p.local_device = ctx.device;
     CAL_CHECK(cal_comm_create(p, &ctx.cal));
 
-    // --- 6. cuBLASMp + cuSOLVERMp handles and their grid views ---
+    // cuBLASMp + cuSOLVERMp handles and their grid views
     CUBLASMP_CHECK(cublasMpCreate(&ctx.cublasmp, ctx.stream));
     CUBLASMP_CHECK(
         cublasMpGridCreate(nprow, npcol, CUBLASMP_GRID_LAYOUT_COL_MAJOR, ctx.cal, &ctx.grid));

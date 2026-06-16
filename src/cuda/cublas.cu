@@ -5,7 +5,7 @@
  * @date   2026-06
  */
 
-#include "kernels.cuh"
+#include "cuda/kernels.cuh"
 #include <type_traits>
 
 namespace cuev {
