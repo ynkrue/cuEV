@@ -31,12 +31,12 @@ namespace mp {
  * @param[in]     ctx    distributed context (grid, handles, stream)
  * @param[in,out] H      distributed n×n symmetric input; overwritten with eigenvectors
  * @param[in]     n      global matrix dimension
- * @param[out]    d_eval device array of length n; eigenvalues ascending (all ranks)
+ * @param[out]    eval   device array of length n; eigenvalues ascending (all ranks)
  * @param[out]    evec   distributed n×n eigenvector matrix (column j = j-th eigenvector)
  * @param[in,out] ws     pre-allocated workspace from workspace_mp_alloc<T>(ctx, n)
  */
 template <typename T>
-void symm_eig_solve_mp(Context &ctx, DistMatrix<T> &H, int64_t n, T *d_eval, DistMatrix<T> &evec,
+void symm_eig_solve_mp(Context &ctx, DistMatrix<T> &H, int64_t n, T *eval, DistMatrix<T> &evec,
                        WorkspaceMp<T> &ws);
 
 } // namespace mp

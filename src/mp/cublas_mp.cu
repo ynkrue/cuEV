@@ -109,6 +109,26 @@ void trsm(Context &ctx, cublasSideMode_t side, cublasFillMode_t uplo, cublasOper
     std::free(hw);
 }
 
+template <typename T>
+void gemr2d(Context &ctx, int64_t m, int64_t n, const T *A, int64_t ia, int64_t ja,
+            cublasMpMatrixDescriptor_t descA, T *B, int64_t ib, int64_t jb,
+            cublasMpMatrixDescriptor_t descB) {
+    size_t wsD = 0, wsH = 0;
+    CUBLASMP_CHECK(cublasMpGemr2D_bufferSize(ctx.cublasmp, m, n, A, ia, ja, descA, B, ib, jb, descB,
+                                             &wsD, &wsH, ctx.cal));
+
+    void *dw = nullptr, *hw = nullptr;
+    CUDA_CHECK(cudaMalloc(&dw, wsD > 0 ? wsD : 1));
+    hw = std::malloc(wsH > 0 ? wsH : 1);
+
+    CUBLASMP_CHECK(cublasMpGemr2D(ctx.cublasmp, m, n, A, ia, ja, descA, B, ib, jb, descB, dw, wsD,
+                                  hw, wsH, ctx.cal));
+    mp_sync(ctx);
+
+    CUDA_CHECK(cudaFree(dw));
+    std::free(hw);
+}
+
 // =============================================================================
 // Explicit instantiations
 // =============================================================================
@@ -126,7 +146,10 @@ void trsm(Context &ctx, cublasSideMode_t side, cublasFillMode_t uplo, cublasOper
     template void trsm<T>(Context &, cublasSideMode_t, cublasFillMode_t, cublasOperation_t,        \
                           cublasDiagType_t, int64_t, int64_t, const T *, const T *, int64_t,       \
                           int64_t, cublasMpMatrixDescriptor_t, T *, int64_t, int64_t,              \
-                          cublasMpMatrixDescriptor_t);
+                          cublasMpMatrixDescriptor_t);                                             \
+    template void gemr2d<T>(Context &, int64_t, int64_t, const T *, int64_t, int64_t,              \
+                            cublasMpMatrixDescriptor_t, T *, int64_t, int64_t,                     \
+                            cublasMpMatrixDescriptor_t);
 
 INSTANTIATE(float)
 INSTANTIATE(double)

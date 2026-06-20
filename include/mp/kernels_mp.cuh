@@ -128,6 +128,27 @@ void trsm(Context &ctx, cublasSideMode_t side, cublasFillMode_t uplo, cublasOper
           int64_t ja, cublasMpMatrixDescriptor_t descA, T *B, int64_t ib, int64_t jb,
           cublasMpMatrixDescriptor_t descB);
 
+/**
+ * @brief Redistribute a submatrix: B[1:m,1:n] ← A[ia:ia+m, ja:ja+n]  (PXGEMR2D).
+ *
+ * Unlike gemm/trsm (PBLAS), the redistribution routine accepts submatrix
+ * offsets @p ia/@p ja (and @p ib/@p jb) that are *not* block-aligned. This is
+ * the only cuBLASMp primitive that can slice a block-cyclic matrix at an
+ * arbitrary column — needed because the spectral split point k = round(trace P)
+ * is data-dependent and almost never a multiple of nb. Used to materialise the
+ * Q1 / Q2 column blocks (and to scatter eigenvector blocks back into evec).
+ *
+ * @tparam T      float or double
+ * @param[in]  ctx   distributed context (handle + CAL comm)
+ * @param[in]  m,n   submatrix dimensions to copy
+ * @param[in]  A     source local device pointer; ia,ja 1-indexed; descA descriptor
+ * @param[out] B     destination local device pointer; ib,jb 1-indexed; descB descriptor
+ */
+template <typename T>
+void gemr2d(Context &ctx, int64_t m, int64_t n, const T *A, int64_t ia, int64_t ja,
+            cublasMpMatrixDescriptor_t descA, T *B, int64_t ib, int64_t jb,
+            cublasMpMatrixDescriptor_t descB);
+
 } // namespace cublasmp
 
 // =============================================================================
@@ -236,6 +257,24 @@ void qdwh_shift_mp(T *A_local, T mu, int64_t local_rows, int64_t local_cols, int
                    int pcol, int nprow, int npcol, int64_t nb, cudaStream_t stream);
 
 /**
+ * @brief In-place scale of a distributed matrix: A ← α·A. Purely local (no
+ *        communication) — use this instead of cublasmp::geadd with A and C
+ *        aliased to the same buffer, which cuBLASMp rejects (INVALID_VALUE)
+ *        regardless of trans.
+ *
+ * @tparam T          float or double
+ * @param[in,out] A_local   local tile buffer (lld × local_cols, column-major)
+ * @param[in]     alpha     scale factor
+ * @param[in]     local_rows  rows this rank stores
+ * @param[in]     local_cols  cols this rank stores
+ * @param[in]     lld       local leading dimension
+ * @param[in]     stream    CUDA stream
+ */
+template <typename T>
+void qdwh_scal_mp(T *A_local, T alpha, int64_t local_rows, int64_t local_cols, int64_t lld,
+                  cudaStream_t stream);
+
+/**
  * @brief Build the 2n×n QDWH work matrix W = [√c·X ; I_n] on local tiles.
  *
  * For global rows 0..n-1:   W[gi,gj] = √c · X[gi,gj].
@@ -277,6 +316,24 @@ void qdwh_fill_C_mp(T *C_local, int64_t m, int64_t k, int64_t lld, int64_t lc, i
                     int nprow, int npcol, int64_t nb, cudaStream_t stream);
 
 /**
+ * @brief Fill a distributed matrix with a deterministic pseudo-random sketch in
+ *        [-1,1] (the Ω for the randomized range finder). Hashes the global
+ *        (row,col) index, so the result is grid-independent and identical on
+ *        every rank; no RNG state, no communication.
+ *
+ * @tparam T        float or double
+ * @param[out] A_local   local tile buffer (lld × local_cols, column-major)
+ * @param[in]  local_rows, local_cols, lld  local tile dimensions
+ * @param[in]  prow,pcol,nprow,npcol,nb  grid / block-size parameters
+ * @param[in]  seed     stream-independent seed (distinct Ω per call site)
+ * @param[in]  stream   CUDA stream
+ */
+template <typename T>
+void rand_fill_mp(T *A_local, int64_t local_rows, int64_t local_cols, int64_t lld, int prow,
+                  int pcol, int nprow, int npcol, int64_t nb, unsigned long long seed,
+                  cudaStream_t stream);
+
+/**
  * @brief Distributed trace: Σ A[i,i] via local reduction + NCCL AllReduce.
  *
  * @tparam T          float or double
@@ -291,6 +348,23 @@ void qdwh_fill_C_mp(T *C_local, int64_t m, int64_t k, int64_t lld, int64_t lc, i
 template <typename T>
 T sdc_trace_mp(Context &ctx, const T *A_local, int64_t local_rows, int64_t local_cols, int64_t lld,
                int prow, int pcol, int nprow, int npcol, int64_t nb);
+
+/**
+ * @brief Distributed Frobenius norm: ‖A‖_F = sqrt(Σ A[i,j]²), via local
+ *        reduction + NCCL AllReduce. Every global element is owned by
+ *        exactly one rank, so (unlike sdc_trace_mp) no diagonal-ownership
+ *        check is needed — every local element contributes once.
+ *
+ * @tparam T          float or double
+ * @param[in]  ctx         distributed context (NCCL comm, stream)
+ * @param[in]  A_local     local tile buffer (lld × local_cols, column-major)
+ * @param[in]  local_rows  rows this rank stores
+ * @param[in]  local_cols  cols this rank stores
+ * @param[in]  lld         local leading dimension
+ * @return     host scalar ‖A‖_F (same value on all ranks after AllReduce)
+ */
+template <typename T>
+T qdwh_norm_mp(Context &ctx, const T *A_local, int64_t local_rows, int64_t local_cols, int64_t lld);
 
 /**
  * @brief Distributed QDWH sign function: B ← sign(B).
@@ -326,8 +400,11 @@ void sdc_split_mp(Context &ctx, const DistMatrix<T> &H, const DistMatrix<T> &Q1,
 /**
  * @brief Back-transform eigenvectors: evec[:,0:m] = Q₂·evec₂, evec[:,m:n] = Q₁·evec₁.
  *
- * Writes into column subranges of evec via the cuBLASMp ic/jc offset mechanism.
- * m = n − k.
+ * Q1 (n×k) and Q2 (n×m) are block-aligned matrices (offset 0,0), so the two
+ * GEMMs need no submatrix offsets. The first product lands directly in
+ * evec[:,0:m] (block-aligned); the second is computed into a temporary and
+ * scattered into evec[:,m:n] with gemr2d, since the m offset is not a multiple
+ * of nb. m = n − k.
  *
  * @tparam T     float or double
  * @param[in]  ctx           distributed context
@@ -335,11 +412,12 @@ void sdc_split_mp(Context &ctx, const DistMatrix<T> &H, const DistMatrix<T> &Q1,
  * @param[in]  evec1,evec2   k×k and m×m sub-eigenvector matrices
  * @param[out] evec          n×n output eigenvector matrix
  * @param[in]  n,k           global dimensions
+ * @param[in,out] ws         workspace (temporary n×k buffer for the second block)
  */
 template <typename T>
 void sdc_combine_mp(Context &ctx, const DistMatrix<T> &Q1, const DistMatrix<T> &Q2,
                     const DistMatrix<T> &evec1, const DistMatrix<T> &evec2, DistMatrix<T> &evec,
-                    int64_t n, int64_t k);
+                    int64_t n, int64_t k, WorkspaceMp<T> &ws);
 
 } // namespace kernels
 } // namespace mp

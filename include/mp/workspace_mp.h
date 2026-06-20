@@ -13,8 +13,11 @@
 #pragma once
 #ifdef CUEV_ENABLE_MP
 
+#include "common.h"
 #include "mp/comm.h"
+#include <algorithm>
 #include <type_traits>
+#include <vector>
 
 namespace cuev {
 namespace mp {
@@ -41,6 +44,8 @@ template <typename T> struct DistMatrix {
     int64_t lld;                     ///< local leading dimension = local_rows
     T *data;                         ///< device pointer to local tiles
     cublasMpMatrixDescriptor_t desc; ///< cuBLASMp layout descriptor
+    cusolverMpMatrixDescriptor_t
+        solverDesc; ///< cuSOLVERMp layout descriptor (same layout, distinct type)
 };
 
 /// Local element count for an m×n matrix on this rank.
@@ -52,7 +57,9 @@ template <typename T> inline int64_t dist_local_count(Context &ctx, int64_t m, i
 
 /**
  * @brief Build a DistMatrix over @p ctx's grid: compute local sizes (numroc)
- *        and create the cuBLASMp descriptor. Does not allocate @p data.
+ *        and create both the cuBLASMp and cuSOLVERMp descriptors (same 2D
+ *        block-cyclic layout, two distinct opaque types). Does not allocate
+ *        @p data.
  *
  * @param local_data device pointer to this rank's local tiles (lld × local_cols)
  */
@@ -69,13 +76,17 @@ inline DistMatrix<T> dist_describe(Context &ctx, int64_t m, int64_t n, T *local_
     // mb=nb (square tiles).
     CUBLASMP_CHECK(cublasMpMatrixDescriptorCreate(m, n, ctx.nb, ctx.nb, 0, 0, A.lld, cuda_type<T>(),
                                                   ctx.grid, &A.desc));
+    CUSOLVER_CHECK(cusolverMpCreateMatrixDesc(&A.solverDesc, ctx.solvergrid, cuda_type<T>(), m, n,
+                                              ctx.nb, ctx.nb, 0, 0, A.lld));
     return A;
 }
 
-/// Destroy the descriptor (does not free caller-owned @c data).
+/// Destroy both descriptors (does not free caller-owned @c data).
 template <typename T> inline void dist_free(DistMatrix<T> &A) {
     if (A.desc) CUBLASMP_CHECK(cublasMpMatrixDescriptorDestroy(A.desc));
+    if (A.solverDesc) CUSOLVER_CHECK(cusolverMpDestroyMatrixDesc(A.solverDesc));
     A.desc = nullptr;
+    A.solverDesc = nullptr;
 }
 
 // =============================================================================
@@ -91,11 +102,14 @@ template <typename T> inline void dist_free(DistMatrix<T> &A) {
 //   d_info          1 × int
 //   qdwh_W          local tiles of 2n×n  (QR work matrix, same role as SolverWorkspace::qdwh_W)
 //   qdwh_tau        local portion of tau(n)
-//   data[6·lr·lc]   mark/reset bump allocator  (lr = numroc(n,…), lc = numroc(n,…))
 //
-// The data pool stores local tile buffers for B, Q, H1/H2, evec1/2, eval1/2
-// across recursion levels — same 6× factor as the single-GPU pool, but each
-// n×n matrix contributes lr·lc elements (≈ n²/p) instead of n².
+// Variable-lifetime tile buffers (B, Q1/Q2, H1/H2, evec1/2, eval1/2, …) are NOT
+// carved from a fixed pool: push() issues a real cudaMalloc and reset() frees
+// LIFO. A single fixed pool cannot be sized reliably here — 2D block-cyclic
+// splits at the data-dependent rank k distribute columns unevenly across ranks,
+// so the heavy rank's footprint for the Q1/Q2 (or H1/H2) sub-blocks exceeds the
+// parent n×n tile, and the excess compounds with recursion depth. The cuMalloc
+// per push is negligible against the distributed GEMM/QR that follows it.
 // =============================================================================
 
 /// Base-case threshold for spectral_dc_mp recursion (matches single-GPU SDC_BASE_N).
@@ -121,33 +135,32 @@ template <typename T> struct WorkspaceMp {
     T *qdwh_W;   ///< local tiles of the 2n×n QR work matrix
     T *qdwh_tau; ///< local portion of the n-element Householder tau vector
 
-    // Data pool — mark/reset bump allocator for variable-lifetime tile buffers
-    T *data;
-    size_t data_cap;  ///< capacity in T elements
-    size_t data_used; ///< current stack pointer in T elements
-
-    // Single backing device allocation owned by this struct
+    // Single backing device allocation for the fixed regions above.
     void *pool;
 
-    /// Allocate @p n T-elements from the data pool; returns device pointer.
+    // Variable-lifetime tile buffers — a LIFO stack of real cudaMalloc'd
+    // buffers. push() allocates, reset() frees back down to a saved mark.
+    std::vector<void *> allocs;
+
+    /// Allocate @p n T-elements (one cudaMalloc); returns device pointer.
     inline T *push(size_t n) {
-        if (data_used + n > data_cap) {
-            fprintf(stderr,
-                    "WorkspaceMp::push overflow: need %zu, capacity %zu "
-                    "(increase pool factor in workspace_mp_alloc)\n",
-                    data_used + n, data_cap);
-            abort();
-        }
-        T *ptr = data + data_used;
-        data_used += n;
-        return ptr;
+        void *ptr = nullptr;
+        CUDA_CHECK(cudaMalloc(&ptr, std::max(n, (size_t)1) * sizeof(T)));
+        allocs.push_back(ptr);
+        return static_cast<T *>(ptr);
     }
 
+    /// Save the current stack depth; pair with reset() to free everything pushed since.
     inline size_t mark() const {
-        return data_used;
+        return allocs.size();
     }
+
+    /// Free (LIFO) every buffer pushed since the matching mark().
     inline void reset(size_t sv) {
-        data_used = sv;
+        while (allocs.size() > sv) {
+            CUDA_CHECK(cudaFree(allocs.back()));
+            allocs.pop_back();
+        }
     }
 };
 

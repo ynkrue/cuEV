@@ -79,11 +79,7 @@ template <typename T> WorkspaceMp<T> workspace_mp_alloc(Context &ctx, int64_t n)
     size_t off_info = off_potrf + align(std::max(ws.potrf_wsD, (size_t)1));
     size_t off_W = off_info + align(sizeof(int));
     size_t off_tau = off_W + align((size_t)lld_2nn * lc * sizeof(T));
-    size_t off_data = off_tau + align((size_t)l_tau * sizeof(T));
-
-    // Data pool: 6 × (local tiles of n×n)
-    ws.data_cap = (size_t)6 * lld_nn * lc;
-    size_t total = off_data + ws.data_cap * sizeof(T);
+    size_t total = off_tau + align((size_t)l_tau * sizeof(T));
 
     CUDA_CHECK(cudaMalloc(&ws.pool, total));
     char *base = static_cast<char *>(ws.pool);
@@ -94,13 +90,12 @@ template <typename T> WorkspaceMp<T> workspace_mp_alloc(Context &ctx, int64_t n)
     ws.d_info = reinterpret_cast<int *>(base + off_info);
     ws.qdwh_W = reinterpret_cast<T *>(base + off_W);
     ws.qdwh_tau = reinterpret_cast<T *>(base + off_tau);
-    ws.data = reinterpret_cast<T *>(base + off_data);
-    ws.data_used = 0;
 
     return ws;
 }
 
 template <typename T> void workspace_mp_free(WorkspaceMp<T> &ws) {
+    ws.reset(0); // free any variable-lifetime buffers still live (should be none)
     CUDA_CHECK(cudaFree(ws.pool));
     std::free(ws.h_work);
     ws = WorkspaceMp<T>{};

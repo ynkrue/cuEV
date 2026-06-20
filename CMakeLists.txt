@@ -109,6 +109,9 @@ if(CUEV_ENABLE_BENCH)
   else()
     add_executable(cuBenchMp bench/bench_mp.cpp)
     target_link_libraries(cuBenchMp PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
+
+    add_executable(cuBenchCuev bench/bench_cuev.cpp)
+    target_link_libraries(cuBenchCuev PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
   endif()
 endif()
 
@@ -123,15 +126,20 @@ if(CUEV_ENABLE_TESTS)
 
     # Unit / integration test suite
     add_executable(cuTest
-    test/test_qdwh.cu
-    test/test_sdc.cu
-    test/test_solver.cu
+    test/cuda/test_qdwh.cu
+    test/cuda/test_sdc.cu
+    test/cuda/test_solver.cu
     )
     target_link_libraries(cuTest PRIVATE cuev GTest::gtest_main CUDA::cublas CUDA::cusolver)
     set_target_properties(cuTest PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
     gtest_discover_tests(cuTest)
   else()
-    add_executable(cuTestMp test/test_mp.cpp)
+    add_executable(cuTestMp
+      test/mp/test_mp.cpp
+      test/mp/test_primitives_mp.cpp
+      test/mp/test_qdwh_mp.cpp
+      test/mp/test_solver_mp.cpp
+    )
     target_link_libraries(cuTestMp PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
   endif()
 endif()
