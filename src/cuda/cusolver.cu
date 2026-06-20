@@ -10,7 +10,7 @@
  * @date   2026-06
  */
 
-#include "kernels.cuh"
+#include "cuda/kernels.cuh"
 #include <cstdio>
 #include <cstdlib>
 #include <type_traits>

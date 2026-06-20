@@ -5,9 +5,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Default to an optimized build: enables -O3 and defines NDEBUG, which compiles
-# out the synchronizing hot-path checks (see cusolver.cu check_info). Configure
-# with -DCMAKE_BUILD_TYPE=Debug to re-enable them.
+# Project Find modules (NCCL, cuBLASMp, cuSOLVERMp)
+list(PREPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
@@ -34,45 +34,65 @@ include("${CPM_FILE}")
 # Options
 # =============================================================================
 option(CUEV_ENABLE_MP "Build distributed multi-GPU solver" OFF)
+option(CUEV_ENABLE_TESTS "Build tests" ON)
+option(CUEV_ENABLE_BENCH "Build benchmarks" ON)
 
 # =============================================================================
 # Dependencies
 # =============================================================================
-CPMAddPackage("gh:google/googletest#v1.14.0")
+if(CUEV_ENABLE_TESTS AND NOT CUEV_ENABLE_MP)
+  CPMAddPackage("gh:google/googletest#v1.14.0")
+endif()
 
 find_package(CUDAToolkit REQUIRED)
 
 if(CUEV_ENABLE_MP)
   find_package(MPI REQUIRED)
+  find_package(NCCL REQUIRED)
+  find_package(CUBLASMp REQUIRED)
+  find_package(CUSOLVERMp REQUIRED)
+  find_package(NVSHMEM REQUIRED)
+  find_package(CAL REQUIRED)
+  find_package(UCC REQUIRED)
 endif()
 
 # =============================================================================
-# cuEV single-GPU library
+# cuEV GPU library
 # =============================================================================
-add_library(cuev SHARED
-  src/cuda/cublas.cu
-  src/cuda/cusolver.cu
-  src/cuda/qdwh.cu
-  src/cuda/sdc.cu
-  src/cuda/solver.cu
-)
-target_include_directories(cuev PUBLIC include)
-target_link_libraries(cuev PUBLIC CUDA::cublas CUDA::cusolver)
-set_target_properties(cuev PROPERTIES
-  CUDA_SEPARABLE_COMPILATION ON
-  POSITION_INDEPENDENT_CODE  ON
-)
-
-# =============================================================================
-# cuEV distributed library  (CUEV_ENABLE_MP=ON)
-# =============================================================================
-if(CUEV_ENABLE_MP)
+if(NOT CUEV_ENABLE_MP)
+  add_library(cuev SHARED
+    src/cuda/workspace.cu
+    src/cuda/cublas.cu
+    src/cuda/cusolver.cu
+    src/cuda/qdwh.cu
+    src/cuda/sdc.cu
+    src/cuda/solver.cu
+  )
+  target_include_directories(cuev PUBLIC include)
+  target_link_libraries(cuev PUBLIC CUDA::cublas CUDA::cusolver)
+  set_target_properties(cuev PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    POSITION_INDEPENDENT_CODE  ON
+  )
+else()
   add_library(cuev_mp SHARED
-    src/mp/qdwh.cu
-    src/mp/solver.cu
+    src/mp/comm.cu
+    src/mp/workspace_mp.cu
+    src/mp/cublas_mp.cu
+    src/mp/cusolver_mp.cu
+    src/mp/qdwh_mp.cu
+    src/mp/sdc_mp.cu
+    src/mp/solver_mp.cu
   )
   target_include_directories(cuev_mp PUBLIC include)
-  target_link_libraries(cuev_mp PUBLIC CUDA::cublas CUDA::cusolver MPI::MPI_CXX)
+  target_compile_definitions(cuev_mp PUBLIC CUEV_ENABLE_MP)
+  target_link_libraries(cuev_mp PUBLIC
+    CUDA::cublas CUDA::cusolver
+    MPI::MPI_CXX NCCL::NCCL
+    cuBLASMp::cuBLASMp cuSOLVERMp::cuSOLVERMp
+    NVSHMEM::NVSHMEM UCC::UCC
+    CAL::CAL
+  )
   set_target_properties(cuev_mp PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     POSITION_INDEPENDENT_CODE  ON
@@ -82,28 +102,47 @@ endif()
 # =============================================================================
 # Benchmark
 # =============================================================================
-add_executable(cuBench bench/bench.cpp)
-target_link_libraries(cuBench PRIVATE cuev CUDA::cudart CUDA::cublas CUDA::cusolver)
+if(CUEV_ENABLE_BENCH)
+  if(NOT CUEV_ENABLE_MP)
+    add_executable(cuBench bench/bench.cpp)
+    target_link_libraries(cuBench PRIVATE cuev CUDA::cudart CUDA::cublas CUDA::cusolver)
+  else()
+    add_executable(cuBenchMp bench/bench_mp.cpp)
+    target_link_libraries(cuBenchMp PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
+
+    add_executable(cuBenchCuev bench/bench_cuev.cpp)
+    target_link_libraries(cuBenchCuev PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
+  endif()
+endif()
 
 # =============================================================================
 # Tests
 # =============================================================================
-enable_testing()
-include(GoogleTest)
 
-# Smoke-test / manual debug binary (own main, no GTest runner)
-add_executable(cuDebug test/debug.cpp)
-target_link_libraries(cuDebug PRIVATE cuev CUDA::cudart CUDA::cublas CUDA::cusolver)
+if(CUEV_ENABLE_TESTS)
+  if(NOT CUEV_ENABLE_MP)
+    enable_testing()
+    include(GoogleTest)
 
-# Unit / integration test suite (GTest runner)
-add_executable(cuTest
-  test/test_qdwh.cu
-  test/test_sdc.cu
-  test/test_solver.cu
-)
-target_link_libraries(cuTest PRIVATE cuev GTest::gtest_main CUDA::cublas CUDA::cusolver)
-set_target_properties(cuTest PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-gtest_discover_tests(cuTest)
+    # Unit / integration test suite
+    add_executable(cuTest
+    test/cuda/test_qdwh.cu
+    test/cuda/test_sdc.cu
+    test/cuda/test_solver.cu
+    )
+    target_link_libraries(cuTest PRIVATE cuev GTest::gtest_main CUDA::cublas CUDA::cusolver)
+    set_target_properties(cuTest PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+    gtest_discover_tests(cuTest)
+  else()
+    add_executable(cuTestMp
+      test/mp/test_mp.cpp
+      test/mp/test_primitives_mp.cpp
+      test/mp/test_qdwh_mp.cpp
+      test/mp/test_solver_mp.cpp
+    )
+    target_link_libraries(cuTestMp PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
+  endif()
+endif()
 
 # =============================================================================
 # Format (clang-format)

@@ -6,7 +6,7 @@
  * For single-GPU usage see cuev.h.
  *
  * Matrix distribution: 2D block-cyclic, BLACS-compatible process grid p×q.
- * Distributed operations via cuBLASMp + NCCL.
+ * Distributed operations via cuBLASMp + cuSOLVERMp + NCCL.
  *
  * @author  Yannik Rüfenacht
  * @date    2026-06
@@ -15,15 +15,29 @@
 #pragma once
 #ifdef CUEV_ENABLE_MP
 
-#include <cuda_runtime.h>
+#include "mp/comm.h"
+#include "mp/workspace_mp.h"
 
 namespace cuev {
 namespace mp {
 
-// TODO: decide on matrix descriptor (BLACS int[9], cublasMpMatrixDescriptor_t, or custom)
-// TODO: decide on communicator handle (NCCL ncclComm_t, cuBLASMp handle, or both)
-
-// symm_eig_solve declaration goes here once descriptors are settled.
+/**
+ * @brief Distributed symmetric dense eigensolver: H v = λv.
+ *
+ * H is overwritten with eigenvectors on exit (columns, ascending order).
+ * d_eval receives eigenvalues ascending; replicated on all ranks.
+ *
+ * @tparam T       float or double
+ * @param[in]     ctx    distributed context (grid, handles, stream)
+ * @param[in,out] H      distributed n×n symmetric input; overwritten with eigenvectors
+ * @param[in]     n      global matrix dimension
+ * @param[out]    eval   device array of length n; eigenvalues ascending (all ranks)
+ * @param[out]    evec   distributed n×n eigenvector matrix (column j = j-th eigenvector)
+ * @param[in,out] ws     pre-allocated workspace from workspace_mp_alloc<T>(ctx, n)
+ */
+template <typename T>
+void symm_eig_solve_mp(Context &ctx, DistMatrix<T> &H, int64_t n, T *eval, DistMatrix<T> &evec,
+                       WorkspaceMp<T> &ws);
 
 } // namespace mp
 } // namespace cuev

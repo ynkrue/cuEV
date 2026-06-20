@@ -7,8 +7,8 @@
  */
 
 #include "common.h"
+#include "cuda/kernels.cuh"
 #include "cuev.h"
-#include "kernels.cuh"
 #include <cmath>
 #include <gtest/gtest.h>
 #include <vector>

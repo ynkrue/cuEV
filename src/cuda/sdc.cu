@@ -13,7 +13,7 @@
  */
 
 #include "common.h"
-#include "kernels.cuh"
+#include "cuda/kernels.cuh"
 #include <cublas_v2.h>
 #include <cusolverDn.h>
 

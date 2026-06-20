@@ -1,0 +1,28 @@
+DOXYFILE_ENCODING      = UTF-8
+PROJECT_NAME           = "cuEV"
+PROJECT_BRIEF          = "CUDA symmetric dense eigensolver"
+OUTPUT_DIRECTORY       = docs
+INPUT                  = include src
+RECURSIVE              = YES
+EXTRACT_ALL            = YES
+BUILTIN_STL_SUPPORT    = YES
+WARN_IF_UNDOCUMENTED   = NO
+
+# File patterns — pick up .h, .cuh, and .cu source files
+FILE_PATTERNS          = *.h *.cuh *.cu *.cpp
+EXTENSION_MAPPING      = cu=C++ cuh=C++
+
+# Output: HTML only (for GitHub Pages)
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+GENERATE_LATEX         = NO
+
+# doxygen-awesome-css theme (submodule at doxygen/)
+HTML_EXTRA_STYLESHEET  = doxygen/doxygen-awesome.css
+GENERATE_TREEVIEW      = YES
+DISABLE_INDEX          = NO
+FULL_SIDEBAR           = NO
+HTML_COLORSTYLE        = LIGHT
+
+QUIET                  = NO
+WARNINGS               = YES
