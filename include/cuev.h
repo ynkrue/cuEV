@@ -2,18 +2,14 @@
  * @file   cuev.h
  * @brief  Public API for cuEV — single-GPU symmetric dense eigensolver.
  *
- * For multi-GPU usage see cuev_mp.h (requires -DCUEV_ENABLE_MP=ON).
- * The performance is worse than cuSOLVER's dsyevd/ssyevd since cuEV has
- * significantly more arithmetic intensity due to the use of QDWH polar iteration,
- * but it is designed to scale to multi-GPU and multi-node systems, where other
- * solver implementations typically fail to scale due to communication bottlenecks.
+ * TODO: add description
  *
  * @author  Yannik Rüfenacht
  * @date    2026-06
  */
 
 #pragma once
-#include "cuda/workspace.h"
+#include "cuda/handle.h"
 #include <cuda_runtime.h>
 
 namespace cuev {
@@ -21,19 +17,15 @@ namespace cuev {
 /**
  * @brief Compute all eigenvalues and eigenvectors of a real symmetric matrix.
  *
- * Solves H v = λ v for all n eigenvalue/eigenvector pairs using spectral
- * divide-and-conquer via QDWH polar iteration. H is overwritten during
- * computation and must not be reused afterwards.
- *
- * Output convention: eigenvectors are stored as **columns** of @p evec (column-major),
- * i.e. `evec[j * n + i]` is the i-th component of the j-th eigenvector.
+ * TODO: add description
+ * Solves H v = λ v for all n eigenvalue/eigenvector pairs ...
  *
  * @tparam T      float or double
- * @param[in,out] H      n×n real symmetric matrix, column-major; overwritten on return
+ * @param[in,out] H      n×n real symmetric matrix (column-major)
  * @param[in]     n      matrix dimension
  * @param[out]    eval   eigenvalues in ascending order, length n
- * @param[out]    evec   eigenvectors as columns, n×n column-major
- * @param[in]     stream CUDA stream; all operations are submitted to this stream
+ * @param[out]    evec   eigenvectors as columns, n×n (column-major)
+ * @param[in]     stream CUDA stream
  */
 template <typename T> void symm_eig_solve(T *H, int n, T *eval, T *evec, cudaStream_t stream);
 

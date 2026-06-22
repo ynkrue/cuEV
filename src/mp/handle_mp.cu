@@ -1,5 +1,5 @@
 /**
- * @file   comm.cu
+ * @file   handle.cu
  * @brief  Distributed execution context bootstrap for cuEV Mp.
  *
  * Implements ctx_init / ctx_finalize / grid_factor from comm.h.

@@ -2,24 +2,7 @@
  * @file   kernels.cuh
  * @brief  CUDA kernel interface and cuBLAS/cuSOLVER wrappers for cuEV.
  *
- * Three sections:
- *
- *   cuev::kernels   Custom GPU kernel launchers:
- *     qdwh_           QDWH polar iteration primitives      (src/cuda/qdwh.cu)
- *     sdc_            Spectral divide-and-conquer helpers  (src/cuda/sdc.cu)
- *
- *   cuev::cublas    Type-dispatching inline wrappers for cuBLAS:
- *                     gemm, symm, geam, scal, copy, nrm2   (src/cuda/cublas.cu)
- *
- *   cuev::cusolver  Type-dispatching inline wrappers for cuSOLVER:
- *                     geqrf, orgqr, syevd                  (src/cuda/cusolver.cu)
- *
- *
- * All matrices are column-major unless documented otherwise.
- * Template parameter @p T is float or double throughout.
- * cuBLAS and cuSOLVER are column-major
- * where needed. All workspace buffers for cuSOLVER are allocated in SolverWorkspace
- * and passed to the wrappers.
+ * TODO: add description
  *
  * @author  Yannik Rüfenacht
  * @date    2026-06
@@ -27,191 +10,162 @@
 
 #pragma once
 #include "common.h"
-#include "cuda/workspace.h"
+#include "cuda/handle.h"
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <cusolverDn.h>
 
 namespace cuev {
 
-namespace kernels {
-
 // =============================================================================
-// QDWH polar iteration
+// cuBLAS dispatching wrappers  (cuev::cublas)
 // =============================================================================
-
-/**
- * @brief In-place diagonal shift: A ← A − μI.
- *
- * Used to form B = H − μI before computing sign(B) via QDWH.
- *
- * @tparam T      float or double
- * @param[in,out] A      n×n matrix, column-major; diagonal modified in place
- * @param[in]     mu     shift scalar μ
- * @param[in]     n      matrix dimension
- * @param[in]     stream CUDA stream
- */
-template <typename T> void qdwh_shift(T *A, T mu, int n, cudaStream_t stream);
-
-/**
- * @brief Set the bottom n×n block of a 2n×n matrix to the identity.
- *
- * Used to build the QDWH work matrix W = [√c·X ; I] before each QR
- * factorization. Top half (√c·X) is filled by the caller via cublasDscal /
- * cublasDcopy; this kernel fills the bottom half.
- *
- * @tparam T      float or double
- * @param[in,out] W      2n×n matrix, column-major; rows n..2n-1 set to I_n
- * @param[in]     n      half-dimension (W has 2n rows, n columns)
- * @param[in]     stream CUDA stream
- */
-template <typename T> void qdwh_eye(T *W, int n, cudaStream_t stream);
-
-/**
- * @brief Symmetrize in place: A ← (A + Aᵀ) / 2.
- *
- * Applied after each QDWH iteration to prevent floating-point drift
- * from breaking symmetry of the iterates.
- *
- * @tparam T      float or double
- * @param[in,out] A      n×n matrix, column-major; symmetrized in place
- * @param[in]     n      matrix dimension
- * @param[in]     stream CUDA stream
- */
-template <typename T> void qdwh_symmetrize(T *A, int n, cudaStream_t stream);
-
-// =============================================================================
-// Spectral divide-and-conquer helpers
-// =============================================================================
-
-/**
- * @brief Compute the trace of a square matrix: returns Σ A[i,i].
- *
- * Used to estimate the spectral midpoint μ ≈ trace(H) / n before each
- * recursive split. Performs a parallel reduction over the diagonal and
- * synchronises the stream before returning the host scalar.
- *
- * @tparam T      float or double
- * @param[in]     A      n×n matrix, column-major
- * @param[in]     n      matrix dimension
- * @param[in]     stream CUDA stream (synchronised internally before return)
- * @return        host scalar Σ A[i,i]
- */
-template <typename T> T sdc_trace(const T *A, int n, cudaStream_t stream);
-
-/**
- * @brief Form the two subproblems: H₁ = Q₁ᵀHQ₁ and H₂ = Q₂ᵀHQ₂.
- *
- * Q₁ (n×k) and Q₂ (n×(n−k)) are the orthonormal bases for the two
- * invariant subspaces extracted from the spectral projector.
- * Each subproblem requires two GEMMs via cuBLAS.
- *
- * @tparam T      float or double
- * @param[in]  cublas  cuBLAS handle
- * @param[in]  H       n×n symmetric matrix, column-major
- * @param[in]  Q1      n×k basis matrix, column-major (columns = basis vectors)
- * @param[in]  Q2      n×(n−k) basis matrix, column-major
- * @param[out] H1      k×k subproblem matrix, column-major
- * @param[out] H2      (n−k)×(n−k) subproblem matrix, column-major
- * @param[in]  n       global dimension
- * @param[in]  k       split size (dimension of first subproblem)
- * @param[in]  stream  CUDA stream
- */
-template <typename T>
-void sdc_split(cublasHandle_t cublas, const T *H, const T *Q1, const T *Q2, T *H1, T *H2, int n,
-               int k, SolverWorkspace<T> *ws, cudaStream_t stream);
-
-/**
- * @brief Combine sub-eigenvectors into the full eigenvector matrix.
- *
- * Applies the basis matrices Q₁ and Q₂ to the sub-eigenvectors:
- *
- *   evec[:, 0:k]   ← Q1 (n×k)     · evec1 (k×k)
- *   evec[:, k:n]   ← Q2 (n×(n−k)) · evec2 ((n−k)×(n−k))
- *
- * Column j of evec is the j-th eigenvector (column-major convention).
- *
- * @tparam T      float or double
- * @param[in]  cublas  cuBLAS handle
- * @param[in]  Q1      n×k basis matrix, column-major
- * @param[in]  Q2      n×(n−k) basis matrix, column-major
- * @param[in]  evec1   k×k eigenvector matrix of H₁, column-major, columns = eigenvectors
- * @param[in]  evec2   (n−k)×(n−k) eigenvector matrix of H₂, column-major, columns = eigenvectors
- * @param[out] evec    n×n output eigenvector matrix, column-major, columns = eigenvectors
- * @param[in]  n       global dimension
- * @param[in]  k       split size
- * @param[in]  ws      workspace for temporary buffers (push/reset, no net allocation)
- * @param[in]  stream  CUDA stream
- */
-template <typename T>
-void sdc_combine(cublasHandle_t cublas, const T *Q1, const T *Q2, const T *evec1, const T *evec2,
-                 T *evec, int n, int k, cudaStream_t stream);
-
-/**
- * @brief Compute the matrix sign function of a symmetric matrix via QDWH.
- *
- * Overwrites B with sign(B) using the QR-based QDWH polar iteration
- * (Nakatsukasa & Higham 2010). Converges in ≤ 8 iterations.
- *
- * @tparam T         float or double
- * @param[in]     cublas    cuBLAS handle
- * @param[in]     cusolver  cuSOLVER handle
- * @param[in,out] B         n×n symmetric matrix, column-major; overwritten with sign(B)
- * @param[in]     n         matrix dimension
- * @param[in]     ws        pre-allocated workspace (owns cuSOLVER scratch + d_info)
- * @param[in]     stream    CUDA stream
- */
-template <typename T>
-void qdwh_sign(cublasHandle_t cublas, cusolverDnHandle_t cusolver, T *B, int n,
-               SolverWorkspace<T> *ws, cudaStream_t stream);
-
-} // namespace kernels
-
-// =============================================================================
-// cuBLAS type-dispatching wrappers  (cuev::cublas)
-// =============================================================================
-
-/**
- * @brief Type-generic wrappers for cuBLAS.
- *
- * Each function dispatches to the S/D cuBLAS overload based on @p T.
- * Arguments are forwarded unchanged — no row/col-major remapping.
- * Errors are wrapped with CUBLAS_CHECK.
- */
 namespace cublas {
 
-/// C ← α·op(A)·op(B) + β·C
+/**
+ * @brief General matrix-matrix multiplication (GEMM). C ← α·op(A)·op(B) + β·C
+ *
+ * op(X) = X, Xᵀ, or Xᴴ depending on the value of transX.  C, A, B are column-major.
+ *
+ * @param[in] h        cuBLAS handle
+ * @param[in] transa   how to interpret A (op(A))
+ * @param[in] transb   how to interpret B (op(B))
+ * @param[in] m        rows of op(A) and C
+ * @param[in] n        columns of op(B) and C
+ * @param[in] k        columns of op(A) and rows of op(B)
+ * @param[in] alpha    scalar multiplier for op(A)·op(B)
+ * @param[in] A        matrix A, column-major, leading dimension lda
+ * @param[in] lda      leading dimension of A (≥ rows of A)
+ * @param[in] B        matrix B, column-major, leading dimension ldb
+ * @param[in] ldb      leading dimension of B (≥ rows of B)
+ * @param[in] beta     scalar multiplier for C
+ * @param[in,out] C    matrix C, column-major, leading dimension ldc; overwritten with the result
+ * @param[in] ldc      leading dimension of C (≥ rows of C)
+ */
 template <typename T>
 void gemm(cublasHandle_t h, cublasOperation_t transa, cublasOperation_t transb, int m, int n, int k,
           const T *alpha, const T *A, int lda, const T *B, int ldb, const T *beta, T *C, int ldc);
 
-/// C ← α·op(A) + β·op(B)
+/**
+ * @brief General matrix addition: C ← α·op(A) + β·op(B)
+ *
+ * op(X) = X or Xᵀ depending on the value of transX.  C, A, B are column-major.
+ *
+ * @param[in] h        cuBLAS handle
+ * @param[in] transa   how to interpret A (op(A))
+ * @param[in] transb   how to interpret B (op(B))
+ * @param[in] m        rows of op(A), op(B), and C
+ * @param[in] n        columns of op(A), op(B), and C
+ * @param[in] alpha    scalar multiplier for op(A)
+ * @param[in] A        matrix A, column-major, leading dimension lda
+ * @param[in] lda      leading dimension of A (≥ rows of A)
+ * @param[in] beta     scalar multiplier for op(B)
+ * @param[in] B        matrix B, column-major, leading dimension ldb
+ * @param[in] ldb      leading dimension of B (≥ rows of B)
+ * @param[in,out] C    matrix C, column-major, leading dimension ldc; overwritten with the result
+ * @param[in] ldc      leading dimension of C (≥ rows of C)
+ */
 template <typename T>
 void geam(cublasHandle_t h, cublasOperation_t transa, cublasOperation_t transb, int m, int n,
           const T *alpha, const T *A, int lda, const T *beta, const T *B, int ldb, T *C, int ldc);
 
-/// C ← α·A·B + β·C  with A symmetric (side=left) — only @p uplo triangle of A read
+/**
+ * @brief Symmetric matrix-matrix multiplication: C ← α·op(A)·op(B) + β·C
+ *
+ * op(X) = X or Xᵀ depending on the value of transX.  C and B are column-major; A is symmetric
+ * with leading dimension lda.  Only the @p uplo triangle of A is referenced
+ *
+ * @param[in] h         cuBLAS handle
+ * @param[in] side      whether A multiplies B from the left or right
+ * @param[in] uplo      which triangle of A is referenced (and where the result is written)
+ * @param[in] m         rows of op(B) and C
+ * @param[in] n         columns of op(B) and C
+ * @param[in] alpha     scalar multiplier for op(A)·op(B)
+ * @param[in] A         symmetric matrix A, column-major, leading dimension lda
+ * @param[in] lda       leading dimension of A (≥ rows of A)
+ * @param[in] B         matrix B, column-major, leading dimension ldb
+ * @param[in] ldb       leading dimension of B (≥ rows of B)
+ * @param[in] beta      scalar multiplier for C
+ * @param[in,out] C     matrix C, column-major, leading dimension ldc; overwritten with the result
+ * @param[in] ldc       leading dimension of C (≥ rows of C)
+ */
 template <typename T>
 void symm(cublasHandle_t h, cublasSideMode_t side, cublasFillMode_t uplo, int m, int n,
           const T *alpha, const T *A, int lda, const T *B, int ldb, const T *beta, T *C, int ldc);
 
-/// C ← α·op(A)·op(A)ᵀ + β·C  (only @p uplo triangle of C is referenced/written)
+/**
+ * @brief Symmetric rank-k update: C ← α·op(A)·op(A)ᵀ + β·C
+ *
+ * Only the @p uplo triangle of C is referenced/written.
+ *
+ * @param[in] h         cuBLAS handle
+ * @param[in] uplo      which triangle of C is referenced (and where the result is written)
+ * @param[in] trans     how to interpret A (op(A))
+ * @param[in] n         rows and columns of op(A) and C
+ * @param[in] k         columns of op(A)
+ * @param[in] alpha     scalar multiplier for op(A)·op(A)ᵀ
+ * @param[in] A         matrix A, column-major, leading dimension lda
+ * @param[in] lda       leading dimension of A (≥ rows of A)
+ * @param[in] beta      scalar multiplier for C
+ * @param[in,out] C     matrix C, column-major, leading dimension ldc; overwritten with the result
+ * @param[in] ldc       leading dimension of C (≥ rows of C)
+ */
 template <typename T>
 void syrk(cublasHandle_t h, cublasFillMode_t uplo, cublasOperation_t trans, int n, int k,
           const T *alpha, const T *A, int lda, const T *beta, T *C, int ldc);
 
-/// B ← α·B·op(A)⁻¹  (side = right, triangular A); B overwritten with the solution
+/**
+ * @brief Triangular solve: B ← α·op(A)⁻¹·B  (or B ← α·B·op(A)⁻¹ if side = right)
+ *
+ * @param[in] h         cuBLAS handle
+ * @param[in] side      whether A multiplies B from the left or right
+ * @param[in] uplo      which triangle of A is referenced (and where the result is written)
+ * @param[in] trans     how to interpret A (op(A))
+ * @param[in] diag      whether A has a unit diagonal
+ * @param[in] m         rows of B
+ * @param[in] n         columns of B
+ * @param[in] alpha     scalar multiplier for the solution
+ * @param[in] A         triangular matrix A, column-major, leading dimension lda
+ * @param[in] lda       leading dimension of A (≥ rows of A)
+ * @param[in,out] B     matrix B, column-major, leading dimension ldb; overwritten with the solution
+ * @param[in] ldb       leading dimension of B (≥ rows of B)
+ */
 template <typename T>
 void trsm(cublasHandle_t h, cublasSideMode_t side, cublasFillMode_t uplo, cublasOperation_t trans,
           cublasDiagType_t diag, int m, int n, const T *alpha, const T *A, int lda, T *B, int ldb);
 
-/// x ← α·x
+/**
+ * @brief Vector scaling: x ← α·x
+ *
+ * @param[in] h         cuBLAS handle
+ * @param[in] n         length of x
+ * @param[in] alpha     scalar multiplier for x
+ * @param[in,out] x     vector x; overwritten with the result
+ * @param[in] incx      stride of x (≥ 1)
+ */
 template <typename T> void scal(cublasHandle_t h, int n, const T *alpha, T *x, int incx);
 
-/// y ← x
+/**
+ * @brief Vector copy: y ← x
+ *
+ * @param[in] h         cuBLAS handle
+ * @param[in] n         length of x and y
+ * @param[in] x         vector x; not modified
+ * @param[in] incx      stride of x (≥ 1)
+ * @param[in,out] y     vector y; overwritten with the result
+ * @param[in] incy      stride of y (≥ 1)
+ */
 template <typename T> void copy(cublasHandle_t h, int n, const T *x, int incx, T *y, int incy);
 
-/// result ← ‖x‖₂
+/**
+ * @brief Vector 2-norm: result = ||x||₂
+ *
+ * @param[in] h         cuBLAS handle
+ * @param[in] n         length of x
+ * @param[in] x         vector x
+ * @param[in] incx      stride of x (≥ 1)
+ * @param[out] result   pointer to the result on the device
+ */
 template <typename T> void nrm2(cublasHandle_t h, int n, const T *x, int incx, T *result);
 
 } // namespace cublas
@@ -219,21 +173,12 @@ template <typename T> void nrm2(cublasHandle_t h, int n, const T *x, int incx, T
 // =============================================================================
 // cuSOLVER type-dispatching wrappers  (cuev::cusolver)
 // =============================================================================
-
-/**
- * @brief Type-generic wrappers for cuSOLVER dense routines.
- *
- * All functions receive a @ref SolverWorkspace pointer and use its pre-allocated
- * buffers (geqrf_buf / orgqr_buf / potrf_buf / syevd_buf / d_info).  No allocation
- * occurs inside these wrappers; all scratch is managed by workspace_alloc / free.
- */
 namespace cusolver {
 
 /**
  * @brief QR factorisation: A ← Q·R  (Householder, in-place).
  *
- * Uses ws->geqrf_buf and ws->d_info.  ws->geqrf_lwork must be ≥ the size
- * required for this (m, n) — guaranteed when ws was allocated for the root n.
+ * TODO: add buffer explenations and references to cuSOLVER docs.
  *
  * @tparam T         float or double
  * @param[in]     h        cuSOLVER handle
@@ -246,13 +191,13 @@ namespace cusolver {
  * @param[in]     stream   CUDA stream
  */
 template <typename T>
-void geqrf(cusolverDnHandle_t h, int m, int n, T *A, int lda, T *tau, SolverWorkspace<T> *ws,
+void geqrf(cusolverDnHandle_t h, int m, int n, T *A, int lda, T *tau, SolverHandle<T> *ws,
            cudaStream_t stream);
 
 /**
  * @brief Materialise Q from compact QR representation.
  *
- * Uses ws->orgqr_buf and ws->d_info.
+ * TODO: add buffer explenations and references to cuSOLVER docs.
  *
  * @tparam T         float or double
  * @param[in]     h        cuSOLVER handle
@@ -267,32 +212,12 @@ void geqrf(cusolverDnHandle_t h, int m, int n, T *A, int lda, T *tau, SolverWork
  */
 template <typename T>
 void orgqr(cusolverDnHandle_t h, int m, int n, int k, T *A, int lda, const T *tau,
-           SolverWorkspace<T> *ws, cudaStream_t stream);
-
-/**
- * @brief Cholesky factorisation of an SPD matrix: A ← U  (A = UᵀU, upper).
- *
- * Used by the Cholesky-based QDWH update once the iterate is well-conditioned.
- * Uses ws->potrf_buf and ws->d_info.
- *
- * @tparam T         float or double
- * @param[in]     h        cuSOLVER handle
- * @param[in]     uplo     which triangle holds A and receives the factor
- * @param[in]     n        matrix dimension
- * @param[in,out] A        n×n SPD matrix, column-major; overwritten with the factor
- * @param[in]     lda      leading dimension
- * @param[in]     ws       pre-allocated workspace (potrf_buf, d_info)
- * @param[in]     stream   CUDA stream
- */
-template <typename T>
-void potrf(cusolverDnHandle_t h, cublasFillMode_t uplo, int n, T *A, int lda,
-           SolverWorkspace<T> *ws, cudaStream_t stream);
+           SolverHandle<T> *ws, cudaStream_t stream);
 
 /**
  * @brief Symmetric dense eigensolver (D&C): A v = λ v.
  *
- * Base-case solver in spectral_dc. Uses ws->syevd_buf and ws->d_info.
- * @p A (column-major) overwritten with eigenvectors; @p W receives eigenvalues ascending.
+ * TODO: add buffer explenations and references to cuSOLVER docs.
  *
  * @tparam T         float or double
  * @param[in]     h        cuSOLVER handle
@@ -304,7 +229,7 @@ void potrf(cusolverDnHandle_t h, cublasFillMode_t uplo, int n, T *A, int lda,
  * @param[in]     stream   CUDA stream
  */
 template <typename T>
-void syevd(cusolverDnHandle_t h, int n, T *A, int lda, T *W, SolverWorkspace<T> *ws,
+void syevd(cusolverDnHandle_t h, int n, T *A, int lda, T *W, SolverHandle<T> *ws,
            cudaStream_t stream);
 
 } // namespace cusolver
