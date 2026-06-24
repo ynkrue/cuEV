@@ -6,15 +6,73 @@ Every `.cu` and `.cuh` file begins with a Doxygen block:
 
 ```cpp
 /**
- * @file   qdwh.cu
+ * @file   dbbr.cu
  * @brief  One-line description.
- *
- * Longer description: algorithm context, mathematical operation,
- * kernel sequence, anything a reader needs without reading all the code.
  *
  * @author  Yannik Rüfenacht
  * @date    2026-06
  */
+```
+
+---
+
+## Naming
+
+| Thing | Convention | Example |
+|---|---|---|
+| Device kernel (`__global__`) | `<prefix>_<op>_kernel` in anonymous namespace | `dbbr_syr2k_kernel` |
+| Host launcher | `<prefix>_<op>` in `cuev::kernels` | `dbbr_syr2k` |
+| cuBLAS wrapper | function name only in `cuev::cublas` | `cublas::gemm` |
+| cuSOLVER wrapper | function name only in `cuev::cusolver` | `cusolver::geqrf` |
+| Kernel prefixes | `dbbr_` band reduction, `bc_` bulge chasing + BC-Back, `bt_` back-transform | |
+| Device pointer (host code) | `d` prefix | `dA`, `d_eval` |
+| Host pointer | `h` prefix | `hA`, `h_eval` |
+| Block size | `constexpr int BLOCK = N` inside launcher | |
+
+---
+
+## Namespaces
+
+```
+cuev              public API: symm_eig_solve, SolverHandle, handle_alloc/free
+cuev::kernels     custom GPU kernel launchers (dbbr_*, bc_*, bt_*)
+cuev::cublas      type-dispatching cuBLAS wrappers — all take SolverHandle<T>*
+cuev::cusolver    workspace-aware cuSOLVER wrappers — all take SolverHandle<T>*
+cuev::mp          multi-GPU API
+```
+
+`__global__` kernels live in anonymous namespaces inside their `.cu` files — never exported.
+
+---
+
+## Handle pattern
+
+All cuBLAS and cuSOLVER wrappers take `SolverHandle<T> *ws` as the first argument and
+extract the handle internally. Never pass `cublasHandle_t` or `cusolverDnHandle_t` directly
+at call sites.
+
+```cpp
+// correct
+cublas::gemm(ws, CUBLAS_OP_N, CUBLAS_OP_T, m, n, k, &alpha, A, lda, B, ldb, &beta, C, ldc);
+
+// wrong — old style, do not use
+cublas::gemm(ws->cublas_handle, CUBLAS_OP_N, ...);
+```
+
+---
+
+## Templates
+
+- All numeric code templated on `T` (float or double)
+- Use `if constexpr (std::is_same_v<T, float>)` for type dispatch
+- Every `.cu` ends with explicit instantiations via the `INSTANTIATE` macro:
+
+```cpp
+#define INSTANTIATE(T) \
+    template void dbbr_panel_qr<T>(SolverHandle<T> *, int, int);
+INSTANTIATE(float)
+INSTANTIATE(double)
+#undef INSTANTIATE
 ```
 
 ---
@@ -25,76 +83,36 @@ Every `.cu` and `.cuh` file begins with a Doxygen block:
 
 ```cpp
 /**
- * @brief In-place diagonal shift: A ← A − μI.
+ * @brief Symmetric rank-2k update: A ← A − Z·Yᵀ − Y·Zᵀ
  *
  * @tparam T      float or double
- * @param[in,out] A      n×n matrix, column-major; diagonal modified in place
- * @param[in]     mu     shift scalar μ
- * @param[in]     n      matrix dimension
- * @param[in]     stream CUDA stream
+ * @param[in]     ws    solver handle
+ * @param[in,out] A     n×n symmetric matrix, column-major; updated in place
+ * @param[in]     Z     n×k matrix, column-major
+ * @param[in]     Y     n×k matrix, column-major
+ * @param[in]     n     matrix dimension
+ * @param[in]     k     number of columns in Z and Y
  */
 template <typename T>
-void qdwh_shift(T *A, T mu, int n, cudaStream_t stream);
+void dbbr_syr2k(SolverHandle<T> *ws, T *A, const T *Z, const T *Y, int n, int k);
 ```
 
 Rules:
 - `@brief` — single sentence ending with a period
-- Math in descriptions uses Unicode (`←`, `ᵀ`, `Σ`, `·`, `α`, `β`)
+- Math uses Unicode: `←`, `ᵀ`, `Σ`, `·`, `α`, `β`
 - `@param` direction tags: `[in]`, `[out]`, `[in,out]`
 - `@tparam T` is always `float or double`
 
 ### `.cu` bodies — non-obvious WHY only
 
-Only comment lines where the **why** is non-obvious: a numerical subtlety, a hardware constraint, a workaround. Never restate what the code does.
-
----
-
-## Naming
-
-| Thing | Convention | Example |
-|---|---|---|
-| Device kernel | `<prefix>_<op>_kernel` | `qdwh_shift_kernel` |
-| Host launcher | `<prefix>_<op>` in `cuev::kernels` | `qdwh_shift` |
-| Prefixes | `qdwh_` QDWH primitives, `sdc_` spectral D&C helpers | |
-| Device pointer (host code) | `d` prefix | `dA`, `d_eval` |
-| Host pointer | `h` prefix | `hA`, `h_eval` |
-| Block size | `constexpr int BLOCKSIZE = N` inside launcher | |
-
----
-
-## Namespaces
-
-```
-cuev            public API: symm_eig_solve, qdwh_sign, SolverWorkspace, workspace_alloc/free
-cuev::kernels   custom GPU kernel launchers (qdwh_*, sdc_*)
-cuev::cublas    type-dispatching cuBLAS wrappers (gemm, geam, scal, copy, nrm2)
-cuev::cusolver  workspace-aware cuSOLVER wrappers (geqrf, orgqr, syevd)
-cuev::mp        multi-GPU API (Phase 3)
-```
-
-`__global__` kernels live in anonymous namespaces inside their `.cu` files — never exported.
-
----
-
-## Templates
-
-- All numeric code templated on `T` (float or double)
-- Use `if constexpr (std::is_same_v<T, float>)` for type dispatch
-- Every `.cu` ends with explicit instantiations:
-
-```cpp
-#define INSTANTIATE(T) \
-    template void qdwh_shift<T>(T *, T, int, cudaStream_t);
-INSTANTIATE(float)
-INSTANTIATE(double)
-#undef INSTANTIATE
-```
+Only comment the **why**: numerical subtlety, hardware constraint, workaround. Never restate
+what the code does.
 
 ---
 
 ## Error Handling
 
-- `CUDA_CHECK(...)` — every CUDA API call in host code
+- `CUDA_CHECK(...)` — every CUDA runtime call in host code
 - `CUBLAS_CHECK(...)` — every cuBLAS call
 - `CUSOLVER_CHECK(...)` — every cuSOLVER call
 - No error checking inside `__global__` kernels
@@ -103,8 +121,8 @@ INSTANTIATE(double)
 
 ## Memory
 
-- All matrices **column-major** (matches cuBLAS/cuSOLVER natively; leading dimension = number of rows)
-- No `cudaMalloc` / `cudaFree` in the hot path — use `SolverWorkspace::push/mark/reset`
+- All matrices **column-major** (matches cuBLAS/cuSOLVER; leading dimension = number of rows)
+- No `cudaMalloc` / `cudaFree` in the hot path — use `SolverHandle::pool` or pre-allocated buffers
 - Eigenvectors stored as **columns**: `evec[j * n + i]` = i-th component of j-th eigenvector
 
 ---

@@ -17,22 +17,22 @@ void gemm(SolverHandle<T> *ws, cublasOperation_t transa, cublasOperation_t trans
           int k, const T *alpha, const T *A, int lda, const T *B, int ldb, const T *beta, T *C,
           int ldc) {
     if constexpr (std::is_same_v<T, float>)
-        CUBLAS_CHECK(cublasSgemm(ws->cublas_handle, transa, transb, m, n, k, alpha, A, lda, B, ldb,
-                                 beta, C, ldc));
+        CUBLAS_CHECK(
+            cublasSgemm(ws->cublas, transa, transb, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc));
     else
-        CUBLAS_CHECK(cublasDgemm(ws->cublas_handle, transa, transb, m, n, k, alpha, A, lda, B, ldb,
-                                 beta, C, ldc));
+        CUBLAS_CHECK(
+            cublasDgemm(ws->cublas, transa, transb, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc));
 }
 
 template <typename T>
 void geam(SolverHandle<T> *ws, cublasOperation_t transa, cublasOperation_t transb, int m, int n,
           const T *alpha, const T *A, int lda, const T *beta, const T *B, int ldb, T *C, int ldc) {
     if constexpr (std::is_same_v<T, float>)
-        CUBLAS_CHECK(cublasSgeam(ws->cublas_handle, transa, transb, m, n, alpha, A, lda, beta, B,
-                                 ldb, C, ldc));
+        CUBLAS_CHECK(
+            cublasSgeam(ws->cublas, transa, transb, m, n, alpha, A, lda, beta, B, ldb, C, ldc));
     else
-        CUBLAS_CHECK(cublasDgeam(ws->cublas_handle, transa, transb, m, n, alpha, A, lda, beta, B,
-                                 ldb, C, ldc));
+        CUBLAS_CHECK(
+            cublasDgeam(ws->cublas, transa, transb, m, n, alpha, A, lda, beta, B, ldb, C, ldc));
 }
 
 template <typename T>
@@ -40,21 +40,30 @@ void symm(SolverHandle<T> *ws, cublasSideMode_t side, cublasFillMode_t uplo, int
           const T *alpha, const T *A, int lda, const T *B, int ldb, const T *beta, T *C, int ldc) {
     if constexpr (std::is_same_v<T, float>)
         CUBLAS_CHECK(
-            cublasSsymm(ws->cublas_handle, side, uplo, m, n, alpha, A, lda, B, ldb, beta, C, ldc));
+            cublasSsymm(ws->cublas, side, uplo, m, n, alpha, A, lda, B, ldb, beta, C, ldc));
     else
         CUBLAS_CHECK(
-            cublasDsymm(ws->cublas_handle, side, uplo, m, n, alpha, A, lda, B, ldb, beta, C, ldc));
+            cublasDsymm(ws->cublas, side, uplo, m, n, alpha, A, lda, B, ldb, beta, C, ldc));
 }
 
 template <typename T>
 void syrk(SolverHandle<T> *ws, cublasFillMode_t uplo, cublasOperation_t trans, int n, int k,
           const T *alpha, const T *A, int lda, const T *beta, T *C, int ldc) {
     if constexpr (std::is_same_v<T, float>)
+        CUBLAS_CHECK(cublasSsyrk(ws->cublas, uplo, trans, n, k, alpha, A, lda, beta, C, ldc));
+    else
+        CUBLAS_CHECK(cublasDsyrk(ws->cublas, uplo, trans, n, k, alpha, A, lda, beta, C, ldc));
+}
+
+template <typename T>
+void syr2k(SolverHandle<T> *ws, cublasFillMode_t uplo, cublasOperation_t trans, int n, int k,
+           const T *alpha, const T *A, int lda, const T *B, int ldb, const T *beta, T *C, int ldc) {
+    if constexpr (std::is_same_v<T, float>)
         CUBLAS_CHECK(
-            cublasSsyrk(ws->cublas_handle, uplo, trans, n, k, alpha, A, lda, beta, C, ldc));
+            cublasSsyr2k(ws->cublas, uplo, trans, n, k, alpha, A, lda, B, ldb, beta, C, ldc));
     else
         CUBLAS_CHECK(
-            cublasDsyrk(ws->cublas_handle, uplo, trans, n, k, alpha, A, lda, beta, C, ldc));
+            cublasDsyr2k(ws->cublas, uplo, trans, n, k, alpha, A, lda, B, ldb, beta, C, ldc));
 }
 
 template <typename T>
@@ -62,32 +71,30 @@ void trsm(SolverHandle<T> *ws, cublasSideMode_t side, cublasFillMode_t uplo,
           cublasOperation_t trans, cublasDiagType_t diag, int m, int n, const T *alpha, const T *A,
           int lda, T *B, int ldb) {
     if constexpr (std::is_same_v<T, float>)
-        CUBLAS_CHECK(
-            cublasStrsm(ws->cublas_handle, side, uplo, trans, diag, m, n, alpha, A, lda, B, ldb));
+        CUBLAS_CHECK(cublasStrsm(ws->cublas, side, uplo, trans, diag, m, n, alpha, A, lda, B, ldb));
     else
-        CUBLAS_CHECK(
-            cublasDtrsm(ws->cublas_handle, side, uplo, trans, diag, m, n, alpha, A, lda, B, ldb));
+        CUBLAS_CHECK(cublasDtrsm(ws->cublas, side, uplo, trans, diag, m, n, alpha, A, lda, B, ldb));
 }
 
 template <typename T> void scal(SolverHandle<T> *ws, int n, const T *alpha, T *x, int incx) {
     if constexpr (std::is_same_v<T, float>)
-        CUBLAS_CHECK(cublasSscal(ws->cublas_handle, n, alpha, x, incx));
+        CUBLAS_CHECK(cublasSscal(ws->cublas, n, alpha, x, incx));
     else
-        CUBLAS_CHECK(cublasDscal(ws->cublas_handle, n, alpha, x, incx));
+        CUBLAS_CHECK(cublasDscal(ws->cublas, n, alpha, x, incx));
 }
 
 template <typename T> void copy(SolverHandle<T> *ws, int n, const T *x, int incx, T *y, int incy) {
     if constexpr (std::is_same_v<T, float>)
-        CUBLAS_CHECK(cublasScopy(ws->cublas_handle, n, x, incx, y, incy));
+        CUBLAS_CHECK(cublasScopy(ws->cublas, n, x, incx, y, incy));
     else
-        CUBLAS_CHECK(cublasDcopy(ws->cublas_handle, n, x, incx, y, incy));
+        CUBLAS_CHECK(cublasDcopy(ws->cublas, n, x, incx, y, incy));
 }
 
 template <typename T> void nrm2(SolverHandle<T> *ws, int n, const T *x, int incx, T *result) {
     if constexpr (std::is_same_v<T, float>)
-        CUBLAS_CHECK(cublasSnrm2(ws->cublas_handle, n, x, incx, result));
+        CUBLAS_CHECK(cublasSnrm2(ws->cublas, n, x, incx, result));
     else
-        CUBLAS_CHECK(cublasDnrm2(ws->cublas_handle, n, x, incx, result));
+        CUBLAS_CHECK(cublasDnrm2(ws->cublas, n, x, incx, result));
 }
 
 // =============================================================================
@@ -102,6 +109,8 @@ template <typename T> void nrm2(SolverHandle<T> *ws, int n, const T *x, int incx
                           const T *, const T *, int, const T *, int, const T *, T *, int);         \
     template void syrk<T>(SolverHandle<T> *, cublasFillMode_t, cublasOperation_t, int, int,        \
                           const T *, const T *, int, const T *, T *, int);                         \
+    template void syr2k<T>(SolverHandle<T> *, cublasFillMode_t, cublasOperation_t, int, int,       \
+                           const T *, const T *, int, const T *, int, const T *, T *, int);        \
     template void trsm<T>(SolverHandle<T> *, cublasSideMode_t, cublasFillMode_t,                   \
                           cublasOperation_t, cublasDiagType_t, int, int, const T *, const T *,     \
                           int, T *, int);                                                          \
