@@ -10,8 +10,40 @@
 #include "cuda/handle.h"
 #include "cuda/kernels.cuh"
 #include "test.h"
+#include <algorithm>
+#include <cusolverDn.h>
+#include <type_traits>
 
 using namespace cutest;
+
+// Ascending eigenvalues of a symmetric matrix (lower triangle) via cuSOLVER syevd.
+template <typename T> static std::vector<T> eig_cusolver(const std::vector<T> &hA, int n) {
+    cusolverDnHandle_t h;
+    cusolverDnCreate(&h);
+    T *dA = to_device(hA), *dW, *dwork;
+    int *dInfo, lwork = 0;
+    cudaMalloc(&dW, n * sizeof(T));
+    cudaMalloc(&dInfo, sizeof(int));
+    auto job = CUSOLVER_EIG_MODE_NOVECTOR;
+    auto uplo = CUBLAS_FILL_MODE_LOWER;
+    if constexpr (std::is_same_v<T, float>)
+        cusolverDnSsyevd_bufferSize(h, job, uplo, n, dA, n, dW, &lwork);
+    else
+        cusolverDnDsyevd_bufferSize(h, job, uplo, n, dA, n, dW, &lwork);
+    cudaMalloc(&dwork, lwork * sizeof(T));
+    if constexpr (std::is_same_v<T, float>)
+        cusolverDnSsyevd(h, job, uplo, n, dA, n, dW, dwork, lwork, dInfo);
+    else
+        cusolverDnDsyevd(h, job, uplo, n, dA, n, dW, dwork, lwork, dInfo);
+    std::vector<T> w(n);
+    to_host(w, dW);
+    cudaFree(dA);
+    cudaFree(dW);
+    cudaFree(dwork);
+    cudaFree(dInfo);
+    cusolverDnDestroy(h);
+    return w; // syevd returns ascending order
+}
 
 // Validates one panel QR: a random rows×b panel A is factorised, then we rebuild
 // the block reflector Q = I − V·T·Vᵀ from the outputs (V, T) and check
@@ -72,6 +104,53 @@ template <typename T> static void panel_qr_case(int rows, int b, double tol) {
     CUDA_CHECK(cudaFree(dV));
     cuev::handle_free(&ws);
     CUDA_CHECK(cudaStreamDestroy(stream));
+}
+
+// Full band reduction: A → band (bandwidth nbw). Validate by (1) spectrum preserved
+// (eigenvalues of the clean band match A's) and (2) nothing strictly below the band.
+template <typename T> static void band_reduce_case(int n, int nbw, int nk, double tol) {
+    cudaStream_t stream;
+    CUDA_CHECK(cudaStreamCreate(&stream));
+    auto ws = cuev::handle_alloc<T>(n, nbw, nk, stream);
+
+    std::vector<T> A0(n * n);
+    fill_random(A0, 7);
+    auto ev_ref = eig_cusolver(A0, n); // reference spectrum (lower triangle)
+
+    T *dA = to_device(A0);
+    cuev::kernels::dbbr_reduce(&ws, dA);
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    std::vector<T> Ab(n * n);
+    to_host(Ab, dA);
+
+    // Clean band: zero everything strictly below the band (r−c > nbw = reflector storage).
+    std::vector<T> band = Ab;
+    for (int c = 0; c < n; ++c)
+        for (int r = c + nbw + 1; r < n; ++r)
+            band[r + c * n] = T(0);
+
+    auto ev = eig_cusolver(band, n);
+    double range = (double)ev_ref[n - 1] - (double)ev_ref[0];
+    double maxdiff = 0;
+    for (int i = 0; i < n; ++i)
+        maxdiff = std::max(maxdiff, std::abs((double)ev[i] - (double)ev_ref[i]));
+    double rel_eig = maxdiff / range;
+    CHECK_LT(rel_eig, tol);
+
+    CUDA_CHECK(cudaFree(dA));
+    cuev::handle_free(&ws);
+    CUDA_CHECK(cudaStreamDestroy(stream));
+}
+
+TEST(dbbr_reduce, fp64_oneblock) {
+    band_reduce_case<double>(256, 64, 256, 1e-9);
+}
+TEST(dbbr_reduce, fp64_multiblock) {
+    band_reduce_case<double>(512, 32, 128, 1e-9);
+}
+TEST(dbbr_reduce, fp32_multiblock) {
+    band_reduce_case<float>(384, 32, 96, 1e-3);
 }
 
 TEST(dbbr_panel_qr, fp64_square) {

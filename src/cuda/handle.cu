@@ -32,17 +32,17 @@ template <typename T> SolverHandle<T> handle_alloc(int n, int nbw, int nk, cudaS
             cusolverDnSgeqrf_bufferSize(ws.cusolver, n, nbw, nullptr, n, &ws.geqrf_lwork));
         CUSOLVER_CHECK(cusolverDnSorgqr_bufferSize(ws.cusolver, n, nbw, nbw, nullptr, n, nullptr,
                                                    &ws.orgqr_lwork));
-        CUSOLVER_CHECK(cusolverDnSsyevd_bufferSize(ws.cusolver, CUSOLVER_EIG_MODE_VECTOR,
-                                                   CUBLAS_FILL_MODE_LOWER, n, nullptr, n, nullptr,
-                                                   &ws.syevd_lwork));
+        // dense syevd unused (D&C runs on the tridiagonal); size that workspace when tridi_dc
+        // lands. Note: dense syevd needs ~2n² and its int lwork overflows for n ≥ 32768.
+        ws.syevd_lwork = 0;
     } else {
         CUSOLVER_CHECK(
             cusolverDnDgeqrf_bufferSize(ws.cusolver, n, nbw, nullptr, n, &ws.geqrf_lwork));
         CUSOLVER_CHECK(cusolverDnDorgqr_bufferSize(ws.cusolver, n, nbw, nbw, nullptr, n, nullptr,
                                                    &ws.orgqr_lwork));
-        CUSOLVER_CHECK(cusolverDnDsyevd_bufferSize(ws.cusolver, CUSOLVER_EIG_MODE_VECTOR,
-                                                   CUBLAS_FILL_MODE_LOWER, n, nullptr, n, nullptr,
-                                                   &ws.syevd_lwork));
+        // dense syevd unused (D&C runs on the tridiagonal); size that workspace when tridi_dc
+        // lands. Note: dense syevd needs ~2n² and its int lwork overflows for n ≥ 32768.
+        ws.syevd_lwork = 0;
     }
 
     // Pool layout

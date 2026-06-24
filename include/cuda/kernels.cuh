@@ -49,6 +49,18 @@ namespace kernels {
 template <typename T> void dbbr_panel_qr(SolverHandle<T> *ws, T *A, T *Y, int rows, int b);
 
 /**
+ * @brief Full DBBR band reduction: symmetric A → band form (bandwidth nbw), in place.
+ *
+ * Orchestrates the panel QR + two-sided update over all panels. A's lower triangle
+ * holds the input; on exit the band is in place (reflectors retained in ws->Y, ws->W).
+ *
+ * @tparam T      float or double
+ * @param[in]     ws    solver handle
+ * @param[in,out] A     n×n symmetric (lower), column-major, lda = ws->n; → band on exit
+ */
+template <typename T> void dbbr_reduce(SolverHandle<T> *ws, T *A);
+
+/**
  * @brief Custom square-blocked symmetric rank-2k update: A ← A − Z·Yᵀ − Y·Zᵀ
  *
  * Replaces cuBLAS dsyr2k with a square tiling order that keeps GEMM shapes
