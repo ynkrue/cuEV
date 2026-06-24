@@ -50,17 +50,19 @@ template <typename T> SolverHandle<T> handle_alloc(int n, int nbw, int nk, cudaS
     const size_t s = sizeof(T);
 
     size_t off = 0;
-    size_t off_Z = off;
-    off += align_up((size_t)n * nk * s);
     size_t off_Y = off;
+    off += align_up((size_t)n * n * s);
+    size_t off_Z = off;
     off += align_up((size_t)n * nk * s);
     size_t off_tau = off;
     off += align_up((size_t)nbw * s);
-    size_t off_V = off;
-    off += align_up((size_t)n * n * s);
+    size_t off_Tmat = off;
+    off += align_up((size_t)nbw * nbw * s);
+    size_t off_Dwk = off;
+    off += align_up((size_t)nk * nbw * s);
     size_t off_W = off;
     off += align_up((size_t)n * n * s);
-    size_t off_Bp = off;
+    size_t off_B = off;
     off += align_up((size_t)(nbw + 1) * n * s);
     size_t off_U = off;
     off += align_up((size_t)n * std::max(n - 2, 1) * s);
@@ -75,12 +77,13 @@ template <typename T> SolverHandle<T> handle_alloc(int n, int nbw, int nk, cudaS
     CUDA_CHECK(cudaMalloc(&ws.pool, ws.pool_bytes));
 
     auto base = (uint8_t *)ws.pool;
-    ws.Z = (T *)(base + off_Z);
     ws.Y = (T *)(base + off_Y);
+    ws.Z = (T *)(base + off_Z);
     ws.tau = (T *)(base + off_tau);
-    ws.V = (T *)(base + off_V);
+    ws.Tmat = (T *)(base + off_Tmat);
+    ws.Dwk = (T *)(base + off_Dwk);
     ws.W = (T *)(base + off_W);
-    ws.Bp = (T *)(base + off_Bp);
+    ws.B = (T *)(base + off_B);
     ws.U = (T *)(base + off_U);
     ws.geqrf_buf = (T *)(base + off_geqrf);
     ws.orgqr_buf = (T *)(base + off_orgqr);

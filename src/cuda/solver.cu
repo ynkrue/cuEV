@@ -3,7 +3,7 @@
  * @brief  2-stage tridiagonalization eigensolver orchestration — single GPU.
  *
  * Pipeline: DBBR → bulge chasing → D&C (tridiagonal) → back-transform.
- * Public entry point: cuev::symm_eig_solve<T>(H, n, eval, evec, stream).
+ * Public entry point: cuev::symm_eig_solve<T>(A, n, eval, evec, stream).
  *
  * @author  Yannik Rüfenacht
  * @date    2026-06
@@ -25,33 +25,35 @@ namespace {
 
 template <typename T> void dbbr_reduce(SolverHandle<T> *ws, T *A) {
     int n = ws->n, b = ws->nbw, k = ws->nk;
-    lda = ws->n;
+    int lda = ws->n;
 
     // outer (block) loop
     for (int i = 0; i < n; i += k) {
-        int kc = std::min(k, n - i); // block width
+        int kc = std::min(k, n - i); // current block width
         int acc = 0;
 
         // inner (panel) loop
         for (int j = i; j < i + kc && j + b < n; j += b) {
-            int pc = std::min(b, n - j); // panel width
-            int rows = n - (j + pc);     // rows below band
+            int pc = std::min(b, n - j); // current panel width
+            int rows = n - (j + pc);
 
-            // Panel QR factorization on A[j+pc : n, j : j+pc]
-            // obtain Householder vectors and tau
-            dbbr_panel_qr(ws, A + j * lda + (j + pc), tau, rows, pc);
+            // Panel QR factorization red panel in [Algorithm 1, Wang et al. 2025]
+            // reflectors extracted into Y buffer
+            kernels::dbbr_panel_qr(ws, A + j * lda + (j + pc), ws->Y + j * lda + (j + pc), rows,
+                                   pc);
 
             // Form ZY factor y for current panel
             acc += pc;
 
-            // Trailing update on next panel A[j+pb : n, j+pc : j+2b]
+            // Trailing update green panel in [Algorithm 1, Wang et al. 2025]
         }
 
-        // Full trailing update on A[i+k : n, i+k : n]
+        // Full trailing update on A [Algorithm 1, Wang et al. 2025]
         T one = T(1);
         T neg1 = T(-1);
         cublas::syr2k(ws, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, n - (i + kc), acc, &neg1,
-                      Z + (i + kc), lda, > (i + kc), lda, &one, A + (i + kc) * lda + (i + kc), lda);
+                      ws->Z + (i + kc), lda, ws->Y + (i + kc), lda, &one,
+                      A + (i + kc) * lda + (i + kc), lda);
 
         // stash Z, Y into V, W at column i for back-transform
     }
@@ -78,13 +80,13 @@ template <typename T> void back_transform(SolverHandle<T> *ws) {
 // Public entry point
 // =============================================================================
 
-template <typename T> void symm_eig_solve(T *H, int n, T *eval, T *evec, cudaStream_t stream) {
+template <typename T> void symm_eig_solve(T *A, int n, T *eval, T *evec, cudaStream_t stream) {
     // Create cuEV handles
     // nbw/nk: b=64 inner bandwidth, k=512 outer panel
     SolverHandle<T> ws = handle_alloc<T>(n, 64, 512, stream);
 
     // double-blocking band reduction
-    dbbr_reduce(&ws, T * H);
+    dbbr_reduce(&ws, A);
 
     // bc_tridi
     bc_tridi(&ws);

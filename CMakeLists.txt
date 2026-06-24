@@ -58,7 +58,7 @@ if(NOT CUEV_ENABLE_MP)
     src/cuda/handle.cu
     src/cuda/cublas.cu
     src/cuda/cusolver.cu
-    # src/cuda/dbbr.cu
+    src/cuda/dbbr.cu
     # src/cuda/bulge.cu
     # src/cuda/backtransform.cu
     src/cuda/solver.cu
@@ -112,21 +112,21 @@ endif()
 # =============================================================================
 # Tests
 # =============================================================================
-# if(CUEV_ENABLE_TESTS)
-#   if(NOT CUEV_ENABLE_MP)
-#     add_executable(cuTest
-#       test/cuda/test_solver.cu
-#     )
-#     target_link_libraries(cuTest PRIVATE cuev CUDA::cublas CUDA::cusolver)
-#     set_target_properties(cuTest PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-#   else()
-#     add_executable(cuTestMp
-#       test/mp/test_mp.cpp
-#     )
-#     target_link_libraries(cuTestMp PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
-#     set_target_properties(cuTestMp PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-#   endif()
-# endif()
+if(CUEV_ENABLE_TESTS)
+  if(NOT CUEV_ENABLE_MP)
+    add_executable(cuTest
+      test/cuda/test_dbbr.cu
+    )
+    target_link_libraries(cuTest PRIVATE cuev CUDA::cudart CUDA::cublas CUDA::cusolver)
+    set_target_properties(cuTest PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+  else()
+    add_executable(cuTestMp
+      test/mp/test_mp.cpp
+    )
+    target_link_libraries(cuTestMp PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
+    set_target_properties(cuTestMp PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+  endif()
+endif()
 
 # =============================================================================
 # Doxygen

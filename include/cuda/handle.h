@@ -34,17 +34,18 @@ template <typename T> struct SolverHandle {
     int *d_info;
 
     // DBBR buffers
-    T *Z;   ///< n*k - left factor of the syr2k update
-    T *Y;   ///< n*k - right factor
-    T *tau; ///< nbw - Householder scalars
+    T *Y;    ///< n*n - Householder reflectors; current block = Y[:,i:], retained for SBR-Back
+    T *Z;    ///< n*k - trailing two-sided companion (syr2k factor), transient per block
+    T *tau;  ///< nbw - Householder scalars
+    T *Tmat; ///< nbw*nbw - block reflector triangular factor T (larft output, transient)
+    T *Dwk;  ///< nk*nbw - panel scratch (Yᵀ·AY and deferral-correction GEMM temps)
+
+    // SBR back buffer
+    T *W; ///< n*n - SBR-Back companion W = Y·T, retained
 
     // BC buffers
-    T *Bp; ///< (b+1)*n - packed banded matrix
-    T *U;  ///< n*(n-2) - BC Householder vectors
-
-    // SBR back buffers
-    T *V; ///< n*n
-    T *W; ///< n*n
+    T *B; ///< (b+1)*n - packed banded matrix
+    T *U; ///< n*(n-2) - BC Householder vectors
 
     // cuSOLVER buffers
     T *geqrf_buf;

@@ -30,22 +30,29 @@ namespace kernels {
 // --- DBBR (double-blocking band reduction) ------------------------------------
 
 /**
- * @brief Panel QR factorisation for one DBBR panel: A ← compact(Q·R), tau ← scalars.
+ * @brief Panel QR + block reflector for one DBBR panel.
+ *
+ * Runs geqrf on the panel and extracts the explicit unit-trapezoidal reflectors
+ * into Y, and forms the b×b block factor T into ws->Tmat. The Householder
+ * scalars τ are staged in ws->tau.
+ *      H₀·H₁···Hₖ  =  I − Y·T·Yᵀ    with Y = [v₀, v₁, …, vₖ]
+ *                                   and T = upper-triangular correction.
  *
  * @tparam T      float or double
- * @param[in]     ws    solver handle (cusolver + geqrf scratch)
- * @param[in,out] A     (n-j) × b panel, column-major; overwritten with compact QR
- * @param[out]    tau   Householder scalars, length b
- * @param[in]     rows  number of rows in the panel (n - j)
+ * @param[in, out] ws   solver handle (cusolver, geqrf scratch, tau, Tmat)
+ * @param[in,out] A     rows × b panel into the working matrix upper triangle ← R,
+ *                      strictly-lower ← packed Householder vectors
+ * @param[out]    Y     rows × b reflectors (panel of ws->Y)
+ * @param[in]     rows  number of rows in the panel (n − j − b)
  * @param[in]     b     panel width (bandwidth)
  */
-template <typename T> void dbbr_panel_qr(SolverHandle<T> *ws, T *A, T *tau, int rows, int b);
+template <typename T> void dbbr_panel_qr(SolverHandle<T> *ws, T *A, T *Y, int rows, int b);
 
 /**
  * @brief Custom square-blocked symmetric rank-2k update: A ← A − Z·Yᵀ − Y·Zᵀ
  *
  * Replaces cuBLAS dsyr2k with a square tiling order that keeps GEMM shapes
- * more square on A100/H100, significantly outperforming cuBLAS for large n.
+ * more square on GPUsH100, significantly outperforming cuBLAS for large n.
  *
  * @tparam T      float or double
  * @param[in]     ws    solver handle
