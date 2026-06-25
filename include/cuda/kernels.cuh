@@ -80,33 +80,39 @@ void dbbr_syr2k(SolverHandle<T> *ws, T *A, const T *Z, const T *Y, int n, int k)
 // --- BC (bulge chasing) -------------------------------------------------------
 
 /**
- * @brief Repack a band matrix into contiguous symmetric storage for L2 reuse.
+ * @brief Repack a band matrix into contiguous symmetric storage.
+ *
+ * Reads the lower band from full n×n storage (DBBR output in A's lower triangle)
+ * into a packed band with leading dim 2b: B[(i−j) + j·2b] = A[i,j], j ≤ i ≤ j+b.
+ * Rows b+1..2b-1 are zeroed to hold the transient bulge during bc_chase.
  *
  * @tparam T      float or double
  * @param[in]     ws    solver handle (stream)
- * @param[in]     B     n×n band matrix, full storage, column-major
- * @param[out]    Bp    packed band buffer, (b+1)×n column-major
+ * @param[in]     A     n×n band matrix (lower band read)
+ * @param[out]    B     packed band buffer, 2b×n column-major
  * @param[in]     n     matrix dimension
  * @param[in]     b     bandwidth
  */
-template <typename T> void bc_pack(SolverHandle<T> *ws, const T *B, T *Bp, int n, int b);
+template <typename T> void bc_pack(SolverHandle<T> *ws, const T *A, T *B, int n, int b);
 
 /**
- * @brief GPU bulge chasing: band → tridiagonal, stores Householder vectors U.
+ * @brief GPU bulge chasing: band → tridiagonal (d, e).
  *
- * Launches n−2 thread blocks (one per sweep). Spin-lock flag array enforces
- * the dependency: sweep i+1 waits until sweep i has completed ≥3 bulges ahead.
+ * Persistent wavefront: one block per sweep, grid-strided over the n−2 sweeps with
+ * gridDim capped to resident occupancy. Each sweep eliminates its column then chases
+ * the bulge down, then hands off to adjacent sweep pipeline via ws->prog — sweep s
+ * waits until sweep s−1 is ≥ 3b columns ahead.
  *
  * @tparam T      float or double
- * @param[in]     ws    solver handle (stream)
- * @param[in,out] Bp    packed band matrix (bc_pack output); overwritten with tridiagonal
+ * @param[in]     ws    solver handle (stream, prog)
+ * @param[in,out] B     packed band matrix
  * @param[out]    d     diagonal of tridiagonal, length n
  * @param[out]    e     sub-diagonal of tridiagonal, length n−1
- * @param[out]    U     Householder vectors for BC-Back, n×(n−2) column-major
+ * @param[in]     U     reserved for BC-Back reflectors
  * @param[in]     n     matrix dimension
  * @param[in]     b     bandwidth
  */
-template <typename T> void bc_chase(SolverHandle<T> *ws, T *Bp, T *d, T *e, T *U, int n, int b);
+template <typename T> void bc_chase(SolverHandle<T> *ws, T *B, T *d, T *e, T *U, int n, int b);
 
 // --- BT (back-transform) -----------------------------------------------------
 

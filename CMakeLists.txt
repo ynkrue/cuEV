@@ -59,7 +59,7 @@ if(NOT CUEV_ENABLE_MP)
     src/cuda/cublas.cu
     src/cuda/cusolver.cu
     src/cuda/dbbr.cu
-    # src/cuda/bulge.cu
+    src/cuda/bulge.cu
     # src/cuda/backtransform.cu
     src/cuda/solver.cu
   )
@@ -103,6 +103,8 @@ if(CUEV_ENABLE_BENCH)
     target_link_libraries(cuBench PRIVATE cuev CUDA::cudart CUDA::cublas CUDA::cusolver)
     add_executable(cuBenchDbbr bench/bench_dbbr.cpp)
     target_link_libraries(cuBenchDbbr PRIVATE cuev CUDA::cudart CUDA::cublas CUDA::cusolver)
+    add_executable(cuBenchEvd bench/bench_evd.cpp)
+    target_link_libraries(cuBenchEvd PRIVATE cuev CUDA::cudart CUDA::cublas CUDA::cusolver)
   else()
     add_executable(cuBenchMp   bench/bench_mp.cpp)
     target_link_libraries(cuBenchMp   PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
@@ -118,6 +120,7 @@ if(CUEV_ENABLE_TESTS)
   if(NOT CUEV_ENABLE_MP)
     add_executable(cuTest
       test/cuda/test_dbbr.cu
+      test/cuda/test_bulge.cu
     )
     target_link_libraries(cuTest PRIVATE cuev CUDA::cudart CUDA::cublas CUDA::cusolver)
     set_target_properties(cuTest PROPERTIES CUDA_SEPARABLE_COMPILATION ON)

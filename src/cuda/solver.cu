@@ -99,8 +99,7 @@ template <typename T> void dbbr_reduce(SolverHandle<T> *ws, T *A) {
             }
         }
 
-        // Update trailing green block in [Algorithm 1, Wang et al. 2025] (deferred
-        // double-blocking):
+        // Update trailing green block in [Algorithm 1, Wang et al. 2025]:
         //   A[i+k:n, i+k:n] -= Y[i+k:n, i:i+w]·Z[i+k:n, 0:w]ᵀ + Z[i+k:n, 0:w]·Y[i+k:n, i:i+w]ᵀ
         cublas::syr2k(ws, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, n - (i + kc), block_cols, &neg1,
                       ws->Y + i * lda + (i + kc), lda, ws->Z + (i + kc), lda, &one,
@@ -110,9 +109,14 @@ template <typename T> void dbbr_reduce(SolverHandle<T> *ws, T *A) {
     }
 }
 
-template <typename T> void bc_tridi(SolverHandle<T> *ws) {
-    // TODO implement band-to-tridiagonal reduction
-    (void)ws;
+template <typename T> void bc_tridi(SolverHandle<T> *ws, T *A) {
+    int n = ws->n, b = ws->nbw;
+
+    // band (A lower triangle) → packed (b+1)×n
+    kernels::bc_pack(ws, A, ws->B, n, b);
+
+    // packed band → tridiagonal (d, e) + Householder vectors U for BC-Back
+    kernels::bc_chase(ws, ws->B, ws->d, ws->e, ws->U, n, b);
 }
 
 template <typename T> void tridi_dc(SolverHandle<T> *ws) {
@@ -140,7 +144,7 @@ template <typename T> void symm_eig_solve(T *A, int n, T *eval, T *evec, cudaStr
     kernels::dbbr_reduce(&ws, A);
 
     // bc_tridi
-    kernels::bc_tridi(&ws);
+    kernels::bc_tridi(&ws, A);
 
     // divide-and-conquer solve
     kernels::tridi_dc(&ws);

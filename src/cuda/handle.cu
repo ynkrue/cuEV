@@ -63,9 +63,15 @@ template <typename T> SolverHandle<T> handle_alloc(int n, int nbw, int nk, cudaS
     size_t off_W = off;
     off += align_up((size_t)n * n * s);
     size_t off_B = off;
-    off += align_up((size_t)(nbw + 1) * n * s);
+    off += align_up((size_t)(2 * nbw) * n * s);
     size_t off_U = off;
     off += align_up((size_t)n * std::max(n - 2, 1) * s);
+    size_t off_d = off;
+    off += align_up((size_t)n * s);
+    size_t off_e = off;
+    off += align_up((size_t)n * s);
+    size_t off_prog = off;
+    off += align_up((size_t)n * sizeof(int));
     size_t off_geqrf = off;
     off += align_up((size_t)ws.geqrf_lwork * s);
     size_t off_orgqr = off;
@@ -85,6 +91,9 @@ template <typename T> SolverHandle<T> handle_alloc(int n, int nbw, int nk, cudaS
     ws.W = (T *)(base + off_W);
     ws.B = (T *)(base + off_B);
     ws.U = (T *)(base + off_U);
+    ws.d = (T *)(base + off_d);
+    ws.e = (T *)(base + off_e);
+    ws.prog = (int *)(base + off_prog);
     ws.geqrf_buf = (T *)(base + off_geqrf);
     ws.orgqr_buf = (T *)(base + off_orgqr);
     ws.syevd_buf = (T *)(base + off_syevd);

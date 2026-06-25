@@ -44,8 +44,11 @@ template <typename T> struct SolverHandle {
     T *W; ///< n*n - SBR-Back companion W = Y·T, retained
 
     // BC buffers
-    T *B; ///< (b+1)*n - packed banded matrix
-    T *U; ///< n*(n-2) - BC Householder vectors
+    T *B;      ///< 2b*n - packed band (band + bulge space)
+    T *U;      ///< n*(n-2) - BC Householder vectors
+    T *d;      ///< tridiagonal diagonal
+    T *e;      ///< tridiagonal off-diagonal
+    int *prog; ///< progress flag for BC
 
     // cuSOLVER buffers
     T *geqrf_buf;
