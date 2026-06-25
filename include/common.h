@@ -41,6 +41,10 @@ inline int div_up(int a, int b) {
     return (a + b - 1) / b;
 }
 
+inline int align_up(int x) {
+    return (x + 255) & ~size_t(255);
+}
+
 // =============================================================================
 // Device helpers
 // =============================================================================
@@ -48,6 +52,29 @@ inline int div_up(int a, int b) {
 
 template <typename T> __device__ __forceinline__ T tabs(T x) {
     return x < T(0) ? -x : x;
+}
+
+/// Reference to packed lower-band A[i,j] (i >= j): packed row = i-j, col = j, leading dim ldb.
+template <typename T> __device__ __forceinline__ T &band_at(T *B, int i, int j, int ldb) {
+    return B[(i - j) + j * ldb];
+}
+
+/// Symmetric read of A[i,j] (any i,j in band); reflects the upper triangle to the stored lower
+/// band.
+template <typename T> __device__ __forceinline__ T band_sym(const T *B, int i, int j, int ldb) {
+    if (i < j) {
+        int t = i;
+        i = j;
+        j = t;
+    }
+    return B[(i - j) + j * ldb];
+}
+
+/// Sum a value across the 32 lanes of a warp; every lane returns the total.
+template <typename T> __device__ __forceinline__ T warp_sum(T v) {
+    for (int o = 16; o > 0; o >>= 1)
+        v += __shfl_xor_sync(0xffffffffu, v, o);
+    return v;
 }
 
 /// Block-wide sum reduction into thread 0. Caller broadcasts and syncs after.

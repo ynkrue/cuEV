@@ -1,24 +1,17 @@
 /**
  * @file   solver.cu
- * @brief  Spectral divide-and-conquer eigensolver orchestration — single GPU.
+ * @brief  2-stage tridiagonalization eigensolver orchestration — single GPU.
  *
- * Public entry point: cuev::symm_eig_solve<T>(H, n, eval, evec, stream).
- *
- * Memory strategy:
- *   workspace_alloc  queries cuSOLVER buffer sizes and issues one cudaMalloc
- *                    for the combined pool (geqrf, orgqr, syevd scratch + d_info).
- *                    The pool is sized for the root problem; all recursion levels
- *                    reuse it.
- *   Per-level data   (B, tau_P, H1, H2, eval1/2, evec1/2) use ws->push/mark/reset —
- *                    stack allocation, no device sync, zero fragmentation.
+ * Pipeline: DBBR → bulge chasing → D&C (tridiagonal) → back-transform.
+ * Public entry point: cuev::symm_eig_solve<T>(A, n, eval, evec, stream).
  *
  * @author  Yannik Rüfenacht
  * @date    2026-06
  */
 
 #include "common.h"
+#include "cuda/handle.h"
 #include "cuda/kernels.cuh"
-#include "cuda/workspace.h"
 #include "cuev.h"
 #include <algorithm>
 #include <cmath>
@@ -28,99 +21,139 @@
 
 namespace cuev {
 
-// =============================================================================
-// spectral_dc — internal recursive solver
-// =============================================================================
-namespace {
+// dbbr_reduce lives in cuev::kernels (declared in kernels.cuh) so tests can call it directly.
+namespace kernels {
 
-template <typename T>
-void spectral_dc(cublasHandle_t cublas, cusolverDnHandle_t cusolver, T *H, int n, T *eval, T *evec,
-                 SolverWorkspace<T> *ws, cudaStream_t stream) {
-    // --- Base case: cuSOLVER syevd ---
-    if (n <= SDC_BASE_N) {
-        cusolver::syevd(cusolver, n, H, n, eval, ws, stream);
-        CUDA_CHECK(
-            cudaMemcpyAsync(evec, H, (size_t)n * n * sizeof(T), cudaMemcpyDeviceToDevice, stream));
-        return;
-    }
-
-    size_t lvl = ws->mark();
-
-    // --- Split point: μ ≈ mean eigenvalue ---
-    T mu = kernels::sdc_trace(H, n, stream) / T(n);
-
-    // --- B ← copy of H, then B ← sign(H − μI) via QDWH ---
-    T *B = ws->push((size_t)n * n);
-    CUDA_CHECK(cudaMemcpyAsync(B, H, (size_t)n * n * sizeof(T), cudaMemcpyDeviceToDevice, stream));
-    kernels::qdwh_shift(B, mu, n, stream);
-    kernels::qdwh_sign(cublas, cusolver, B, n, ws, stream);
-
-    // --- P = (I + sign(B)) / 2 — spectral projector onto eigenvalues > μ ---
-    T *P = B;
-    T half = T(0.5);
+template <typename T> void dbbr_reduce(SolverHandle<T> *ws, T *A) {
+    int n = ws->n, b = ws->nbw, k = ws->nk;
+    int lda = ws->n;
     T zero = T(0);
-    cublas::geam(cublas, CUBLAS_OP_N, CUBLAS_OP_N, n, n, &half, P, n, &zero, P, n, P, n);
-    kernels::qdwh_shift(P, -half, n, stream);
+    T one = T(1);
+    T neg1 = T(-1);
+    T neg_half = T(-0.5);
 
-    // --- Split size k = rank(P) ---
-    // P as orthogonal projector implies trace(P) = rank(P) = k.
-    int k = (int)std::lround(kernels::sdc_trace(P, n, stream));
+    // outer (block) loop
+    for (int i = 0; i < n; i += k) {
+        int kc = std::min(k, n - i); // current block width
+        int block_cols = 0;          // reflector columns Y/Z accumulated so far in this block
 
-    // --- QR(P) → Q; Q1 = Q[:,0:k], Q2 = Q[:,k:n] ---
-    T *tau_P = ws->push((size_t)n);
-    cusolver::geqrf(cusolver, n, n, P, n, tau_P, ws, stream);
-    cusolver::orgqr(cusolver, n, n, k, P, n, tau_P, ws, stream);
+        // inner (panel) loop
+        for (int j = i; j < i + kc && j + b < n; j += b) {
+            int pc = std::min(b, n - j); // current panel width
+            int rows = n - (j + pc);
+            int off = j * lda + (j + pc);
+            int tr = (j + pc) * lda + (j + pc);
+            int zc = (j - i) * lda + (j + pc);
 
-    T *Q1 = P;                 // n×k, cols 0..k-1
-    T *Q2 = P + (size_t)n * k; // n×(n-k), cols k..n-1
+            /// Panel QR factorization red panel in [Algorithm 1, Wang et al. 2025]
+            kernels::dbbr_panel_qr(ws, A + off, ws->Y + off, rows, pc);
 
-    // --- Form subproblems ---
-    T *H1 = ws->push((size_t)k * k);
-    T *H2 = ws->push((size_t)(n - k) * (n - k));
-    kernels::sdc_split(cublas, H, Q1, Q2, H1, H2, n, k, ws, stream);
+            /// Update trailing green panel in [Algorithm 1, Wang et al. 2025]
+            // W = Y·T
+            cublas::gemm(ws, CUBLAS_OP_N, CUBLAS_OP_N, rows, pc, pc, &one, ws->Y + off, lda,
+                         ws->Tmat, pc, &zero, ws->W + off, lda);
 
-    // --- Recurse ---
-    T *eval1 = ws->push((size_t)k);
-    T *evec1 = ws->push((size_t)k * k);
-    spectral_dc(cublas, cusolver, H1, k, eval1, evec1, ws, stream);
+            // P = A[off]·W
+            cublas::symm(ws, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, rows, pc, &one, A + tr, lda,
+                         ws->W + off, lda, &zero, ws->Z + zc, lda);
 
-    T *eval2 = ws->push((size_t)(n - k));
-    T *evec2 = ws->push((size_t)(n - k) * (n - k));
-    spectral_dc(cublas, cusolver, H2, n - k, eval2, evec2, ws, stream);
+            // Subtract previous panel contribution from P (w = block_cols):
+            //   P -= Y[j+b:n, i:i+w]·(Z[j+b:n, 0:w]ᵀ·W) + Z[j+b:n, 0:w]·(Y[j+b:n, i:i+w]ᵀ·W)
+            if (block_cols > 0) {
+                // D = Z[j+b:n, 0:w]ᵀ·W
+                cublas::gemm(ws, CUBLAS_OP_T, CUBLAS_OP_N, block_cols, pc, rows, &one,
+                             ws->Z + (j + pc), lda, ws->W + off, lda, &zero, ws->Dwk, block_cols);
+                // P -= Y[j+b:n, i:i+w]·D
+                cublas::gemm(ws, CUBLAS_OP_N, CUBLAS_OP_N, rows, pc, block_cols, &neg1,
+                             ws->Y + i * lda + (j + pc), lda, ws->Dwk, block_cols, &one, ws->Z + zc,
+                             lda);
+                // D = Y[j+b:n, i:i+w]ᵀ·W
+                cublas::gemm(ws, CUBLAS_OP_T, CUBLAS_OP_N, block_cols, pc, rows, &one,
+                             ws->Y + i * lda + (j + pc), lda, ws->W + off, lda, &zero, ws->Dwk,
+                             block_cols);
+                // P -= Z[j+b:n, 0:w]·D
+                cublas::gemm(ws, CUBLAS_OP_N, CUBLAS_OP_N, rows, pc, block_cols, &neg1,
+                             ws->Z + (j + pc), lda, ws->Dwk, block_cols, &one, ws->Z + zc, lda);
+            }
 
-    // --- Merge eigenvalues: [eval2 | eval1] ascending ---
-    int m = n - k;
-    CUDA_CHECK(
-        cudaMemcpyAsync(eval, eval2, (size_t)m * sizeof(T), cudaMemcpyDeviceToDevice, stream));
-    CUDA_CHECK(
-        cudaMemcpyAsync(eval + m, eval1, (size_t)k * sizeof(T), cudaMemcpyDeviceToDevice, stream));
+            // C = Wᵀ·P
+            cublas::gemm(ws, CUBLAS_OP_T, CUBLAS_OP_N, pc, pc, rows, &one, ws->W + off, lda,
+                         ws->Z + zc, lda, &zero, ws->Dwk, pc);
 
-    // --- Back-transform eigenvectors: evec = [Q2·evec2 | Q1·evec1] ---
-    kernels::sdc_combine(cublas, Q1, Q2, evec1, evec2, evec, n, k, stream);
+            // Z = P - 0.5·W·C
+            cublas::gemm(ws, CUBLAS_OP_N, CUBLAS_OP_N, rows, pc, pc, &neg_half, ws->Y + off, lda,
+                         ws->Dwk, pc, &one, ws->Z + zc, lda);
 
-    ws->reset(lvl);
+            block_cols += pc;
+
+            // green update if next panel is within this block
+            if (j + pc < i + kc) {
+                // A[j+b:n, j+b:j+2b] -= Z[j+b:n, 0:w]·Y[j+b:j+2b, i:i+w]ᵀ
+                cublas::gemm(ws, CUBLAS_OP_N, CUBLAS_OP_T, rows, pc, block_cols, &neg1,
+                             ws->Z + (j + pc), lda, ws->Y + i * lda + (j + pc), lda, &one, A + tr,
+                             lda);
+                // A[j+b:n, j+b:j+2b] -= Y[j+b:n, i:i+w]·Z[j+b:j+2b, 0:w]ᵀ
+                cublas::gemm(ws, CUBLAS_OP_N, CUBLAS_OP_T, rows, pc, block_cols, &neg1,
+                             ws->Y + i * lda + (j + pc), lda, ws->Z + (j + pc), lda, &one, A + tr,
+                             lda);
+            }
+        }
+
+        // Update trailing green block in [Algorithm 1, Wang et al. 2025]:
+        //   A[i+k:n, i+k:n] -= Y[i+k:n, i:i+w]·Z[i+k:n, 0:w]ᵀ + Z[i+k:n, 0:w]·Y[i+k:n, i:i+w]ᵀ
+        cublas::syr2k(ws, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, n - (i + kc), block_cols, &neg1,
+                      ws->Y + i * lda + (i + kc), lda, ws->Z + (i + kc), lda, &one,
+                      A + (i + kc) * lda + (i + kc), lda);
+
+        // stash Z, Y into V, W at column i for back-transform
+    }
 }
 
-} // namespace
+template <typename T> void bc_tridi(SolverHandle<T> *ws, T *A) {
+    int n = ws->n, b = ws->nbw;
+
+    // band (A lower triangle) → packed (b+1)×n
+    kernels::bc_pack(ws, A, ws->B, n, b);
+
+    // packed band → tridiagonal (d, e) + Householder vectors U for BC-Back
+    kernels::bc_chase(ws, ws->B, ws->d, ws->e, ws->U, n, b);
+}
+
+template <typename T> void tridi_dc(SolverHandle<T> *ws) {
+    // TODO: implement solver
+    (void)ws;
+}
+
+template <typename T> void back_transform(SolverHandle<T> *ws) {
+    // TODO: implement back-transform of eigenvectors
+    (void)ws;
+}
+
+} // namespace kernels
 
 // =============================================================================
 // Public entry point
 // =============================================================================
 
-template <typename T> void symm_eig_solve(T *H, int n, T *eval, T *evec, cudaStream_t stream) {
-    cublasHandle_t cublas;
-    cusolverDnHandle_t cusolver;
-    CUBLAS_CHECK(cublasCreate(&cublas));
-    CUBLAS_CHECK(cublasSetStream(cublas, stream));
-    CUSOLVER_CHECK(cusolverDnCreate(&cusolver));
-    CUSOLVER_CHECK(cusolverDnSetStream(cusolver, stream));
+template <typename T> void symm_eig_solve(T *A, int n, T *eval, T *evec, cudaStream_t stream) {
+    // Create cuEV handles
+    // nbw/nk: b=64 inner bandwidth, k=512 outer panel
+    SolverHandle<T> ws = handle_alloc<T>(n, 64, 512, stream);
 
-    SolverWorkspace<T> ws = workspace_alloc<T>(cusolver, n, stream);
-    spectral_dc(cublas, cusolver, H, n, eval, evec, &ws, stream);
-    workspace_free(ws);
+    // double-blocking band reduction
+    kernels::dbbr_reduce(&ws, A);
 
-    CUBLAS_CHECK(cublasDestroy(cublas));
-    CUSOLVER_CHECK(cusolverDnDestroy(cusolver));
+    // bc_tridi
+    kernels::bc_tridi(&ws, A);
+
+    // divide-and-conquer solve
+    kernels::tridi_dc(&ws);
+
+    // back-transform eigenvectors
+    kernels::back_transform(&ws);
+
+    // cleanup
+    handle_free(&ws);
 }
 
 // =============================================================================
@@ -128,4 +161,6 @@ template <typename T> void symm_eig_solve(T *H, int n, T *eval, T *evec, cudaStr
 // =============================================================================
 template void symm_eig_solve<float>(float *, int, float *, float *, cudaStream_t);
 template void symm_eig_solve<double>(double *, int, double *, double *, cudaStream_t);
+template void kernels::dbbr_reduce<float>(SolverHandle<float> *, float *);
+template void kernels::dbbr_reduce<double>(SolverHandle<double> *, double *);
 } // namespace cuev

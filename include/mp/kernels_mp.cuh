@@ -1,23 +1,16 @@
 /**
  * @file   kernels_mp.cuh
- * @brief  Distributed CUDA kernel interface and cuBLASMp/cuSOLVERMp wrappers for cuEV.
+ * @brief  Distributed kernel launchers and cuBLASMp/cuSOLVERMp wrappers for cuEV.
  *
  * Three sections:
  *
- *   cuev::mp::kernels     Distributed custom GPU kernel launchers:
- *     qdwh_shift_mp       Diagonal shift on a distributed matrix
- *     qdwh_fill_W_mp      Build 2n×n work matrix W = [√c·X ; I] on local tiles
- *     qdwh_fill_C_mp      Fill C = [I_k ; 0] for Ormqr-based Q materialisation
- *     sdc_trace_mp        Local diagonal reduction + NCCL AllReduce → host scalar
- *     qdwh_sign_mp        Distributed QDWH polar iteration
- *     sdc_split_mp        H₁ = Q₁ᵀHQ₁, H₂ = Q₂ᵀHQ₂
- *     sdc_combine_mp      evec = [Q₂·evec₂ | Q₁·evec₁]
+ *   cuev::mp::kernels     Distributed custom GPU kernel launchers (dbbr_*, bc_*, bt_*)
  *
  *   cuev::mp::cublasmp    Type-dispatching wrappers for cuBLASMp:
- *                         gemm, geadd, syrk, trsm
+ *                         gemm, geadd, syrk, syr2k, trsm, gemr2d
  *
  *   cuev::mp::cusolvermp  Wrappers for cuSOLVERMp using WorkspaceMp pre-allocated scratch:
- *                         geqrf, ormqr, potrf, syevd
+ *                         geqrf, ormqr, syevd
  *
  * All matrices are column-major, 2D block-cyclic (BLACS-compatible, rsrc=csrc=0).
  *
@@ -30,14 +23,14 @@
 
 #include "common.h"
 #include "mp/comm.h"
-#include "mp/workspace_mp.h"
+#include "mp/handle_mp.h"
 #include <cstdint>
 #include <cublas_v2.h>
 
 namespace cuev {
 namespace mp {
 
-/// cudaDataType for T (CUDA_R_32F / CUDA_R_64F).
+/// cuBLAS compute type selector for T.
 template <typename T> inline cublasComputeType_t compute_type() {
     if constexpr (std::is_same_v<T, float>)
         return CUBLAS_COMPUTE_32F;
@@ -109,6 +102,28 @@ void syrk(Context &ctx, cublasFillMode_t uplo, cublasOperation_t trans, int64_t 
           const T *beta, T *C, int64_t ic, int64_t jc, cublasMpMatrixDescriptor_t descC);
 
 /**
+ * @brief C ← α·op(A)·op(B)ᵀ + α·op(B)·op(A)ᵀ + β·C  (rank-2k; only @p uplo written).
+ *
+ * Used in distributed DBBR trailing update: C=A, A=Z, B=Y, α=-1, β=1.
+ *
+ * @tparam T      float or double
+ * @param[in]  ctx   distributed context
+ * @param[in]  uplo  which triangle of C to write
+ * @param[in]  trans CUBLAS_OP_N or CUBLAS_OP_T applied to A and B
+ * @param[in]  n,k   C is n×n; A and B are n×k (OP_N) or k×n (OP_T)
+ * @param[in]  alpha scalar α
+ * @param[in]  A     local device pointer; ia,ja 1-indexed; descA descriptor
+ * @param[in]  B     local device pointer; ib,jb 1-indexed; descB descriptor
+ * @param[in]  beta  scalar β
+ * @param[in,out] C  local device pointer; ic,jc 1-indexed; descC descriptor
+ */
+template <typename T>
+void syr2k(Context &ctx, cublasFillMode_t uplo, cublasOperation_t trans, int64_t n, int64_t k,
+           const T *alpha, const T *A, int64_t ia, int64_t ja, cublasMpMatrixDescriptor_t descA,
+           const T *B, int64_t ib, int64_t jb, cublasMpMatrixDescriptor_t descB, const T *beta,
+           T *C, int64_t ic, int64_t jc, cublasMpMatrixDescriptor_t descC);
+
+/**
  * @brief Triangular solve: B ← α·op(A)⁻¹·B  or  B ← α·B·op(A)⁻¹.
  *
  * @tparam T      float or double
@@ -129,14 +144,10 @@ void trsm(Context &ctx, cublasSideMode_t side, cublasFillMode_t uplo, cublasOper
           cublasMpMatrixDescriptor_t descB);
 
 /**
- * @brief Redistribute a submatrix: B[1:m,1:n] ← A[ia:ia+m, ja:ja+n]  (PXGEMR2D).
+ * @brief Redistribute a submatrix: B[ib:ib+m, jb:jb+n] ← A[ia:ia+m, ja:ja+n]  (PXGEMR2D).
  *
- * Unlike gemm/trsm (PBLAS), the redistribution routine accepts submatrix
- * offsets @p ia/@p ja (and @p ib/@p jb) that are *not* block-aligned. This is
- * the only cuBLASMp primitive that can slice a block-cyclic matrix at an
- * arbitrary column — needed because the spectral split point k = round(trace P)
- * is data-dependent and almost never a multiple of nb. Used to materialise the
- * Q1 / Q2 column blocks (and to scatter eigenvector blocks back into evec).
+ * Accepts non-block-aligned offsets. Used to scatter eigenvector blocks (Q_d)
+ * back into the full distributed evec matrix after the D&C solve.
  *
  * @tparam T      float or double
  * @param[in]  ctx   distributed context (handle + CAL comm)
@@ -175,9 +186,6 @@ void geqrf(Context &ctx, int64_t m, int64_t n, T *A, int64_t ia, int64_t ja,
 /**
  * @brief Apply Q from a prior Geqrf to C: C ← op(Q)·C  (side=left).
  *
- * Set C = [I_k ; 0_{(m-k)×k}] before calling to materialise the economy Q.
- * Uses ws.ormqr_dwork / ws.ormqr_wsD.
- *
  * @tparam T      float or double
  * @param[in]     ctx    distributed context
  * @param[in]     side   must be CUBLAS_SIDE_LEFT
@@ -187,7 +195,7 @@ void geqrf(Context &ctx, int64_t m, int64_t n, T *A, int64_t ia, int64_t ja,
  * @param[in]     A      compact QR from Geqrf; ia,ja 1-indexed; descA descriptor
  * @param[in]     tau    Householder scalars from Geqrf
  * @param[in,out] C      local device pointer; ic,jc 1-indexed; descC descriptor
- * @param[in,out] ws     workspace (ormqr_dwork, h_work, d_info)
+ * @param[in,out] ws     workspace (h_work, d_info)
  */
 template <typename T>
 void ormqr(Context &ctx, cublasSideMode_t side, cublasOperation_t trans, int64_t m, int64_t n,
@@ -196,27 +204,10 @@ void ormqr(Context &ctx, cublasSideMode_t side, cublasOperation_t trans, int64_t
            WorkspaceMp<T> &ws);
 
 /**
- * @brief Cholesky factorisation: A ← factor  (A = Lᵀ·L or L·Lᵀ).
- *
- * Uses ws.potrf_dwork / ws.potrf_wsD.
- *
- * @tparam T      float or double
- * @param[in]     ctx   distributed context
- * @param[in]     uplo  CUBLAS_FILL_MODE_LOWER or UPPER
- * @param[in]     n     global dimension of A
- * @param[in,out] A     local device pointer; ia,ja 1-indexed; descA descriptor
- * @param[in,out] ws    workspace (potrf_dwork, h_work, d_info)
- */
-template <typename T>
-void potrf(Context &ctx, cublasFillMode_t uplo, int64_t n, T *A, int64_t ia, int64_t ja,
-           cusolverMpMatrixDescriptor_t descA, WorkspaceMp<T> &ws);
-
-/**
- * @brief Symmetric dense eigensolver: A v = λv  (base case).
+ * @brief Symmetric dense eigensolver: A v = λv  (tridiagonal D&C base case).
  *
  * A is overwritten with eigenvectors (columns, ascending order).
  * W receives eigenvalues ascending, replicated on all ranks.
- * Allocates its own workspace per call (size depends on n at each leaf).
  *
  * @tparam T      float or double
  * @param[in]     ctx    distributed context
@@ -224,7 +215,7 @@ void potrf(Context &ctx, cublasFillMode_t uplo, int64_t n, T *A, int64_t ia, int
  * @param[in,out] A      local device pointer; ia,ja 1-indexed; descA descriptor
  * @param[out]    W      eigenvalues, length n, device pointer (all ranks)
  * @param[out]    Z      eigenvectors output; iz,jz 1-indexed; descZ descriptor
- * @param[in,out] ws     workspace (h_work, d_info reused; syevd scratch self-allocated)
+ * @param[in,out] ws     workspace (h_work, d_info; syevd scratch self-allocated)
  */
 template <typename T>
 void syevd(Context &ctx, int64_t n, T *A, int64_t ia, int64_t ja,
@@ -234,190 +225,100 @@ void syevd(Context &ctx, int64_t n, T *A, int64_t ia, int64_t ja,
 } // namespace cusolvermp
 
 // =============================================================================
-// cuev::mp::kernels — distributed element-wise kernels and high-level primitives
+// cuev::mp::kernels — distributed custom GPU kernel launchers (Phase 2 stubs)
 // =============================================================================
 namespace kernels {
 
-/**
- * @brief In-place diagonal shift on a distributed n×n matrix: A[gi,gi] -= mu.
- *
- * Only elements where global row == global col are touched; no communication.
- *
- * @tparam T          float or double
- * @param[in,out] A_local   local tile buffer (lld × local_cols, column-major)
- * @param[in]     mu        shift scalar
- * @param[in]     local_rows  rows this rank stores
- * @param[in]     local_cols  cols this rank stores
- * @param[in]     lld       local leading dimension
- * @param[in]     prow,pcol,nprow,npcol,nb  grid / block-size parameters
- * @param[in]     stream    CUDA stream
- */
-template <typename T>
-void qdwh_shift_mp(T *A_local, T mu, int64_t local_rows, int64_t local_cols, int64_t lld, int prow,
-                   int pcol, int nprow, int npcol, int64_t nb, cudaStream_t stream);
+// --- DBBR_MP -----------------------------------------------------------------
 
 /**
- * @brief In-place scale of a distributed matrix: A ← α·A. Purely local (no
- *        communication) — use this instead of cublasmp::geadd with A and C
- *        aliased to the same buffer, which cuBLASMp rejects (INVALID_VALUE)
- *        regardless of trans.
+ * @brief Distributed DBBR panel QR on local column tiles.
  *
- * @tparam T          float or double
- * @param[in,out] A_local   local tile buffer (lld × local_cols, column-major)
- * @param[in]     alpha     scale factor
- * @param[in]     local_rows  rows this rank stores
- * @param[in]     local_cols  cols this rank stores
- * @param[in]     lld       local leading dimension
- * @param[in]     stream    CUDA stream
+ * Performs the panel QR for one b-column panel of the distributed band reduction.
+ * No inter-rank communication — each rank QRs its own local rows.
+ *
+ * @tparam T      float or double
+ * @param[in]     ctx   distributed context
+ * @param[in,out] A     distributed matrix; panel column j, rows j..n-1
+ * @param[out]    tau   Householder scalars, local portion, length b
+ * @param[in]     j     global starting column of this panel
+ * @param[in]     b     panel width (bandwidth)
+ * @param[in,out] ws    workspace
  */
 template <typename T>
-void qdwh_scal_mp(T *A_local, T alpha, int64_t local_rows, int64_t local_cols, int64_t lld,
-                  cudaStream_t stream);
+void dbbr_panel_qr_mp(Context &ctx, DistMatrix<T> &A, T *tau, int64_t j, int64_t b,
+                      WorkspaceMp<T> &ws);
 
 /**
- * @brief Build the 2n×n QDWH work matrix W = [√c·X ; I_n] on local tiles.
+ * @brief Distributed DBBR trailing syr2k update: A ← A − Z·Yᵀ − Y·Zᵀ
  *
- * For global rows 0..n-1:   W[gi,gj] = √c · X[gi,gj].
- * For global rows n..2n-1:  W[gi,gj] = (gi−n == gj) ? 1 : 0.
+ * Deferred trailing update applied every k columns. Uses cublasmp::syr2k
+ * (or custom distributed kernel for large n).
  *
- * @tparam T        float or double
- * @param[out] W_local  local tile of the 2n×n work matrix (lld_W × lc)
- * @param[in]  X_local  local tile of the n×n input matrix  (lld_X × lc)
- * @param[in]  scale    √c
- * @param[in]  n        half-dimension (W has 2n global rows, n global cols)
- * @param[in]  lld_W    local leading dimension of W
- * @param[in]  lld_X    local leading dimension of X
- * @param[in]  lc       number of local columns (same for W and X)
- * @param[in]  prow,pcol,nprow,npcol,nb  grid / block-size parameters
- * @param[in]  stream   CUDA stream
+ * @tparam T      float or double
+ * @param[in]     ctx   distributed context
+ * @param[in,out] A     distributed n×n symmetric matrix
+ * @param[in]     Z     distributed n×k accumulated Z-block
+ * @param[in]     Y     distributed n×k accumulated Y-block
+ * @param[in,out] ws    workspace
  */
 template <typename T>
-void qdwh_fill_W_mp(T *W_local, const T *X_local, T scale, int64_t n, int64_t lld_W, int64_t lld_X,
-                    int64_t lc, int prow, int pcol, int nprow, int npcol, int64_t nb,
-                    cudaStream_t stream);
+void dbbr_syr2k_mp(Context &ctx, DistMatrix<T> &A, const DistMatrix<T> &Z, const DistMatrix<T> &Y,
+                   WorkspaceMp<T> &ws);
+
+// --- BC_MP -------------------------------------------------------------------
 
 /**
- * @brief Fill a distributed m×k matrix with the truncated identity [I_k ; 0].
+ * @brief Distributed GPU bulge chasing: band → tridiagonal.
  *
- * Sets C[gi,gj] = 1 if gi == gj and gi < k, else 0.
- * Called before ormqr to materialise the economy Q.
+ * Novel Phase 2 contribution. The band matrix is O(n·b) data — gathered to a
+ * grid-row-local layout for the GPU sweep kernel, then results redistributed.
+ * Stores Householder vectors U for distributed BC-Back.
  *
- * @tparam T        float or double
- * @param[out] C_local  local tile buffer (lld × lc, column-major)
- * @param[in]  m        global rows of C
- * @param[in]  k        global cols of C
- * @param[in]  lld      local leading dimension
- * @param[in]  lc       number of local columns
- * @param[in]  prow,pcol,nprow,npcol,nb  grid / block-size parameters
- * @param[in]  stream   CUDA stream
+ * @tparam T      float or double
+ * @param[in]     ctx   distributed context
+ * @param[in,out] B     distributed band matrix (DBBR output); tridiagonal on exit
+ * @param[out]    d     diagonal of tridiagonal, length n (replicated)
+ * @param[out]    e     sub-diagonal of tridiagonal, length n−1 (replicated)
+ * @param[out]    U     distributed BC Householder vectors for BC-Back
+ * @param[in]     b     bandwidth
+ * @param[in,out] ws    workspace
  */
 template <typename T>
-void qdwh_fill_C_mp(T *C_local, int64_t m, int64_t k, int64_t lld, int64_t lc, int prow, int pcol,
-                    int nprow, int npcol, int64_t nb, cudaStream_t stream);
+void bc_chase_mp(Context &ctx, DistMatrix<T> &B, T *d, T *e, DistMatrix<T> &U, int64_t b,
+                 WorkspaceMp<T> &ws);
+
+// --- BT_MP -------------------------------------------------------------------
 
 /**
- * @brief Fill a distributed matrix with a deterministic pseudo-random sketch in
- *        [-1,1] (the Ω for the randomized range finder). Hashes the global
- *        (row,col) index, so the result is grid-independent and identical on
- *        every rank; no RNG state, no communication.
+ * @brief Distributed SBR-Back: Q ← (I − W·Yᵀ)·Q using recursive WY.
  *
- * @tparam T        float or double
- * @param[out] A_local   local tile buffer (lld × local_cols, column-major)
- * @param[in]  local_rows, local_cols, lld  local tile dimensions
- * @param[in]  prow,pcol,nprow,npcol,nb  grid / block-size parameters
- * @param[in]  seed     stream-independent seed (distinct Ω per call site)
- * @param[in]  stream   CUDA stream
+ * @tparam T      float or double
+ * @param[in]     ctx   distributed context
+ * @param[in,out] Q     distributed n×n orthogonal matrix; updated in place
+ * @param[in]     W     distributed SBR W-blocks
+ * @param[in]     Y     distributed SBR Y-blocks
+ * @param[in]     b     bandwidth used in DBBR
+ * @param[in]     k     outer panel size used in DBBR
+ * @param[in,out] ws    workspace
  */
 template <typename T>
-void rand_fill_mp(T *A_local, int64_t local_rows, int64_t local_cols, int64_t lld, int prow,
-                  int pcol, int nprow, int npcol, int64_t nb, unsigned long long seed,
-                  cudaStream_t stream);
+void bt_sbr_back_mp(Context &ctx, DistMatrix<T> &Q, const DistMatrix<T> &W, const DistMatrix<T> &Y,
+                    int64_t b, int64_t k, WorkspaceMp<T> &ws);
 
 /**
- * @brief Distributed trace: Σ A[i,i] via local reduction + NCCL AllReduce.
+ * @brief Distributed BC-Back: Q ← Q_b · Q using BLAS2 Householder application.
  *
- * @tparam T          float or double
- * @param[in]  ctx         distributed context (NCCL comm, stream)
- * @param[in]  A_local     local tile buffer (lld × local_cols, column-major)
- * @param[in]  local_rows  rows this rank stores
- * @param[in]  local_cols  cols this rank stores
- * @param[in]  lld         local leading dimension
- * @param[in]  prow,pcol,nprow,npcol,nb  grid / block-size parameters
- * @return     host scalar Σ A[i,i] (same value on all ranks after AllReduce)
+ * @tparam T      float or double
+ * @param[in]     ctx   distributed context
+ * @param[in,out] Q     distributed n×n matrix (from SBR-Back)
+ * @param[in]     U     distributed BC Householder vectors from bc_chase_mp
+ * @param[in]     b     bandwidth
+ * @param[in,out] ws    workspace
  */
 template <typename T>
-T sdc_trace_mp(Context &ctx, const T *A_local, int64_t local_rows, int64_t local_cols, int64_t lld,
-               int prow, int pcol, int nprow, int npcol, int64_t nb);
-
-/**
- * @brief Distributed Frobenius norm: ‖A‖_F = sqrt(Σ A[i,j]²), via local
- *        reduction + NCCL AllReduce. Every global element is owned by
- *        exactly one rank, so (unlike sdc_trace_mp) no diagonal-ownership
- *        check is needed — every local element contributes once.
- *
- * @tparam T          float or double
- * @param[in]  ctx         distributed context (NCCL comm, stream)
- * @param[in]  A_local     local tile buffer (lld × local_cols, column-major)
- * @param[in]  local_rows  rows this rank stores
- * @param[in]  local_cols  cols this rank stores
- * @param[in]  lld         local leading dimension
- * @return     host scalar ‖A‖_F (same value on all ranks after AllReduce)
- */
-template <typename T>
-T qdwh_norm_mp(Context &ctx, const T *A_local, int64_t local_rows, int64_t local_cols, int64_t lld);
-
-/**
- * @brief Distributed QDWH sign function: B ← sign(B).
- *
- * Iterates until convergence (≤ 6 steps). Each step uses either a QR update
- * or a Cholesky update depending on the conditioning coefficient c.
- *
- * @tparam T     float or double
- * @param[in]     ctx  distributed context
- * @param[in,out] B    n×n matrix in/out; sign(B) on exit
- * @param[in,out] ws   workspace (qdwh_W, qdwh_tau, geqrf/ormqr/potrf scratch)
- */
-template <typename T> void qdwh_sign_mp(Context &ctx, DistMatrix<T> &B, WorkspaceMp<T> &ws);
-
-/**
- * @brief Form subproblems H₁ = Q₁ᵀHQ₁ and H₂ = Q₂ᵀHQ₂.
- *
- * @tparam T     float or double
- * @param[in]  ctx   distributed context
- * @param[in]  H     n×n symmetric input matrix (lower fill)
- * @param[in]  Q1    n×k orthonormal basis
- * @param[in]  Q2    n×m orthonormal basis  (m = n − k)
- * @param[out] H1    k×k output subproblem
- * @param[out] H2    m×m output subproblem
- * @param[in]  n,k   global dimensions
- * @param[in,out] ws workspace (data pool for temporary n×k and n×m buffers)
- */
-template <typename T>
-void sdc_split_mp(Context &ctx, const DistMatrix<T> &H, const DistMatrix<T> &Q1,
-                  const DistMatrix<T> &Q2, DistMatrix<T> &H1, DistMatrix<T> &H2, int64_t n,
-                  int64_t k, WorkspaceMp<T> &ws);
-
-/**
- * @brief Back-transform eigenvectors: evec[:,0:m] = Q₂·evec₂, evec[:,m:n] = Q₁·evec₁.
- *
- * Q1 (n×k) and Q2 (n×m) are block-aligned matrices (offset 0,0), so the two
- * GEMMs need no submatrix offsets. The first product lands directly in
- * evec[:,0:m] (block-aligned); the second is computed into a temporary and
- * scattered into evec[:,m:n] with gemr2d, since the m offset is not a multiple
- * of nb. m = n − k.
- *
- * @tparam T     float or double
- * @param[in]  ctx           distributed context
- * @param[in]  Q1,Q2         n×k and n×m basis matrices
- * @param[in]  evec1,evec2   k×k and m×m sub-eigenvector matrices
- * @param[out] evec          n×n output eigenvector matrix
- * @param[in]  n,k           global dimensions
- * @param[in,out] ws         workspace (temporary n×k buffer for the second block)
- */
-template <typename T>
-void sdc_combine_mp(Context &ctx, const DistMatrix<T> &Q1, const DistMatrix<T> &Q2,
-                    const DistMatrix<T> &evec1, const DistMatrix<T> &evec2, DistMatrix<T> &evec,
-                    int64_t n, int64_t k, WorkspaceMp<T> &ws);
+void bt_bc_back_mp(Context &ctx, DistMatrix<T> &Q, const DistMatrix<T> &U, int64_t b,
+                   WorkspaceMp<T> &ws);
 
 } // namespace kernels
 } // namespace mp

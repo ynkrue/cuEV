@@ -9,6 +9,7 @@
  */
 
 #include "common.h"
+#include "cuda/handle.h"
 #include "cuev.h"
 #include <cstdio>
 #include <cstring>
