@@ -68,7 +68,7 @@ template <typename T> static void panel_qr_case(int rows, int b, double tol) {
     std::vector<T> Apk(rows * b), V(rows * b), Tm(b * b);
     to_host(Apk, dA);
     to_host(V, dV);
-    to_host(Tm, ws.Tmat);
+    to_host(Tm, ws.Tri);
 
     // R_full (rows×b): upper triangle of the packed factor, zeros below
     std::vector<T> R(rows * b, T(0));
@@ -118,7 +118,7 @@ template <typename T> static void band_reduce_case(int n, int nbw, int nk, doubl
     auto ev_ref = eig_cusolver(A0, n); // reference spectrum (lower triangle)
 
     T *dA = to_device(A0);
-    cuev::kernels::dbbr_reduce(&ws, dA);
+    cuev::kernels::dbbr_reduce(&ws, dA, ws.B);
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
     std::vector<T> Ab(n * n);

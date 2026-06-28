@@ -41,39 +41,11 @@ void geqrf(SolverHandle<T> *ws, int m, int n, T *A, int lda, T *tau, cudaStream_
     check_info(ws->d_info, "geqrf", stream);
 }
 
-template <typename T>
-void orgqr(SolverHandle<T> *ws, int m, int n, int k, T *A, int lda, const T *tau,
-           cudaStream_t stream) {
-    if constexpr (std::is_same_v<T, float>)
-        CUSOLVER_CHECK(cusolverDnSorgqr(ws->cusolver, m, n, k, A, lda, tau, ws->orgqr_buf,
-                                        ws->orgqr_lwork, ws->d_info));
-    else
-        CUSOLVER_CHECK(cusolverDnDorgqr(ws->cusolver, m, n, k, A, lda, tau, ws->orgqr_buf,
-                                        ws->orgqr_lwork, ws->d_info));
-    check_info(ws->d_info, "orgqr", stream);
-}
-
-template <typename T>
-void syevd(SolverHandle<T> *ws, int n, T *A, int lda, T *W, cudaStream_t stream) {
-    cusolverEigMode_t jobz = CUSOLVER_EIG_MODE_VECTOR;
-    cublasFillMode_t uplo = CUBLAS_FILL_MODE_LOWER;
-    if constexpr (std::is_same_v<T, float>)
-        CUSOLVER_CHECK(cusolverDnSsyevd(ws->cusolver, jobz, uplo, n, A, lda, W, ws->syevd_buf,
-                                        ws->syevd_lwork, ws->d_info));
-    else
-        CUSOLVER_CHECK(cusolverDnDsyevd(ws->cusolver, jobz, uplo, n, A, lda, W, ws->syevd_buf,
-                                        ws->syevd_lwork, ws->d_info));
-    check_info(ws->d_info, "syevd", stream);
-}
-
 // =============================================================================
 // Explicit instantiations
 // =============================================================================
 #define INSTANTIATE(T)                                                                             \
-    template void geqrf<T>(SolverHandle<T> *, int, int, T *, int, T *, cudaStream_t);              \
-    template void orgqr<T>(SolverHandle<T> *, int, int, int, T *, int, const T *, cudaStream_t);   \
-    template void syevd<T>(SolverHandle<T> *, int, T *, int, T *, cudaStream_t);
-
+    template void geqrf<T>(SolverHandle<T> *, int, int, T *, int, T *, cudaStream_t);
 INSTANTIATE(float)
 INSTANTIATE(double)
 #undef INSTANTIATE

@@ -26,7 +26,10 @@ namespace cuev {
  * @param[out]    eval   eigenvalues in ascending order, length n
  * @param[out]    evec   eigenvectors as columns, n×n (column-major)
  * @param[in]     stream CUDA stream
+ * @param[out]    timer  optional per-stage timing breakdown
  */
-template <typename T> void symm_eig_solve(T *A, int n, T *eval, T *evec, cudaStream_t stream);
+template <typename T>
+void symm_eig_solve(T *A, int n, T *eval, T *evec, cudaStream_t stream,
+                    SolveTimer *timer = nullptr);
 
 } // namespace cuev

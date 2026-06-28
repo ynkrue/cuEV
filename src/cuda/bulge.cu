@@ -79,28 +79,6 @@ template <typename T> __device__ void householder(T *x, int L, T &beta, T *red) 
 }
 
 /**
- * @brief Pack the lower band of n×n matrix into a 2b-row packed band.
- *
- * Column-major; sub-diagonal index (i-j) is the packed row, leading dim 2b.
- * Rows 0..b hold the band A[j..j+b, j]; rows b+1..2b-1 are zeroed.
- *
- * @param[in]  A    n×n band matrix
- * @param[out] Bp   packed band, 2b×n
- * @param[in]  n    matrix dimension
- * @param[in]  b    bandwidth
- * @param[in]  lda  leading dimension of A
- */
-template <typename T> __global__ void bc_pack_kernel(const T *A, T *Bp, int n, int b, int lda) {
-    const int ldb = 2 * b;
-    int r = blockIdx.x * blockDim.x + threadIdx.x;
-    int j = blockIdx.y * blockDim.y + threadIdx.y;
-    if (r >= ldb || j >= n) return;
-
-    int i = j + r;
-    Bp[r + j * ldb] = (r <= b && i < n) ? A[i + (size_t)j * lda] : T(0);
-}
-
-/**
  * @brief One bulge-chasing reflector step.
  *
  * Eliminates column cq below row r0 with a Householder on rows [r0,r1], then applies
@@ -109,8 +87,8 @@ template <typename T> __global__ void bc_pack_kernel(const T *A, T *Bp, int n, i
  * This is one iteration of Algorithm 2 from Wang et al. (the H·A·H of B_d, B_ol, B_od).
  */
 template <typename T>
-__device__ void bc_apply_step(T *B, T *sx, T *sp, T *sy, T *red, int r0, int r1, int cq, int n,
-                              int ldb) {
+__device__ void bc_apply_step(T *B, T *sx, T *sw, T *sp, T *sy, T *red, int r0, int r1, int cq,
+                              int n, int ldb) {
     const int tid = threadIdx.x;
     const int b = ldb / 2;
     const int L = r1 - r0 + 1;
@@ -130,6 +108,7 @@ __device__ void bc_apply_step(T *B, T *sx, T *sp, T *sy, T *red, int r0, int r1,
         for (int t = 0; t < L; ++t)
             acc += band_sym(B, i, r0 + t, ldb) * sx[t];
         sp[idx] = T(2) * acc;
+        sw[idx] = (i >= r0 && i <= r1) ? sx[i - r0] : T(0);
     }
     __syncthreads();
 
@@ -138,21 +117,19 @@ __device__ void bc_apply_step(T *B, T *sx, T *sp, T *sy, T *red, int r0, int r1,
     for (int t = tid; t < L; t += BC_THREADS)
         kloc += sx[t] * sp[(r0 + t) - lo];
     const T kappa = block_sum(kloc, red);
-    for (int idx = tid; idx < W; idx += BC_THREADS) {
-        const int i = lo + idx;
-        const T wi = (i >= r0 && i <= r1) ? sx[i - r0] : T(0);
-        sy[idx] = sp[idx] - kappa * wi;
-    }
+    for (int idx = tid; idx < W; idx += BC_THREADS)
+        sy[idx] = sp[idx] - kappa * sw[idx];
     __syncthreads();
 
     // rank-2 update A[i,j] −= w_i·y_j + y_i·w_j
-    for (int i = lo + tid; i <= hi; i += BC_THREADS) {
-        const T wi = (i >= r0 && i <= r1) ? sx[i - r0] : T(0);
-        const T yi = sy[i - lo];
-        for (int j = lo; j <= i; ++j) {
-            const T wj = (j >= r0 && j <= r1) ? sx[j - r0] : T(0);
-            const T upd = wi * sy[j - lo] + yi * wj;
-            if (upd != T(0)) band_at(B, i, j, ldb) -= upd;
+    const int warp = tid >> 5, lane = tid & 31, nwarps = BC_THREADS >> 5;
+    for (int j = lo + warp; j <= hi; j += nwarps) {
+        const T wj = sw[j - lo], yj = sy[j - lo];
+        for (int d = lane; d < 2 * b; d += 32) {
+            const int i = j + d;
+            if (i > hi) continue;
+            const T upd = sw[i - lo] * yj + sy[i - lo] * wj;
+            if (upd != T(0)) B[d + (size_t)j * ldb] -= upd;
         }
     }
     __syncthreads();
@@ -173,11 +150,13 @@ __device__ void bc_apply_step(T *B, T *sx, T *sp, T *sy, T *red, int r0, int r1,
  * to resident occupancy so every block is co-resident. prog[s] = n + 3b on
  * completion releases the successor's tail.
  *
- * d/e are extracted by bc_extract_kernel afterwards.
- * U (reflectors for BC-Back) is not stored yet.
+ * d/e are extracted by bc_extract_kernel afterwards. Each hop's reflector w is
+ * stashed into U[:,s].
  */
-template <typename T> __global__ void bc_chase_kernel(T *B, int n, int b, int *prog) {
-    __shared__ T sx[BC_MAX_B];     // reflector / w
+template <typename T>
+__global__ void bc_chase_kernel(T *B, T *U, int ldu, int n, int b, int *prog) {
+    __shared__ T sx[BC_MAX_B];     // reflector w
+    __shared__ T sw[3 * BC_MAX_B]; // w as a row-indexed vector over [lo,hi]
     __shared__ T sp[3 * BC_MAX_B]; // p = 2·A·w over the affected range
     __shared__ T sy[3 * BC_MAX_B]; // y = p − κ·w
     __shared__ T red[BC_THREADS];  // block-reduction scratch
@@ -208,7 +187,11 @@ template <typename T> __global__ void bc_chase_kernel(T *B, int n, int b, int *p
                 __threadfence();
             }
 
-            bc_apply_step(B, sx, sp, sy, red, r0, r1, cq, n, ldb);
+            bc_apply_step(B, sx, sw, sp, sy, red, r0, r1, cq, n, ldb);
+
+            // stash reflector w (sx, rows [r0,r1]) into U[:,s] for BC-Back
+            for (int t = tid; t <= r1 - r0; t += BC_THREADS)
+                __stcs(&U[(size_t)(r0 + t) + (size_t)s * ldu], sx[t]);
 
             // publish frontier (release)
             __threadfence();
@@ -234,16 +217,8 @@ template <typename T> __global__ void bc_extract_kernel(const T *B, T *d, T *e, 
 namespace cuev {
 namespace kernels {
 
-template <typename T> void bc_pack(SolverHandle<T> *ws, const T *A, T *Bp, int n, int b) {
-    const int lda = ws->n;
-    constexpr int BX = 32, BY = 8;
-    dim3 block(BX, BY);
-    dim3 grid(div_up(2 * b, BX), div_up(n, BY));
-    bc_pack_kernel<<<grid, block, 0, ws->stream>>>(A, Bp, n, b, lda);
-}
-
-template <typename T> void bc_chase(SolverHandle<T> *ws, T *B, T *d, T *e, T *U, int n, int b) {
-    (void)U; // BC-Back reflectors deferred
+template <typename T> void bc_chase(SolverHandle<T> *ws, T *B, T *d, T *e) {
+    int n = ws->n, b = ws->nbw;
     const int nsweeps = n - 2;
     if (nsweeps <= 0) return;
 
@@ -255,7 +230,7 @@ template <typename T> void bc_chase(SolverHandle<T> *ws, T *B, T *d, T *e, T *U,
     CUDA_CHECK(cudaDeviceGetAttribute(&numSM, cudaDevAttrMultiProcessorCount, 0));
     int wavefront = 2 * div_up(n, 3 * b);
     int grid = std::max(1, std::min(std::min(nsweeps, wavefront), blocksPerSM * numSM));
-    bc_chase_kernel<<<grid, BC_THREADS, 0, ws->stream>>>(B, n, b, ws->prog);
+    bc_chase_kernel<<<grid, BC_THREADS, 0, ws->stream>>>(B, ws->U, ws->ldu, n, b, ws->prog);
 
     bc_extract_kernel<<<div_up(n, 256), 256, 0, ws->stream>>>(B, d, e, n, b);
 }
@@ -263,9 +238,7 @@ template <typename T> void bc_chase(SolverHandle<T> *ws, T *B, T *d, T *e, T *U,
 // =============================================================================
 // Explicit instantiations
 // =============================================================================
-#define INSTANTIATE(T)                                                                             \
-    template void bc_pack<T>(SolverHandle<T> *, const T *, T *, int, int);                         \
-    template void bc_chase<T>(SolverHandle<T> *, T *, T *, T *, T *, int, int);
+#define INSTANTIATE(T) template void bc_chase<T>(SolverHandle<T> *, T *, T *, T *);
 INSTANTIATE(float)
 INSTANTIATE(double)
 #undef INSTANTIATE

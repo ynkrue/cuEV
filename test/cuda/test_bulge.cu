@@ -62,9 +62,8 @@ template <typename T> static void bulge_case(int n, int nbw, int nk, double tol)
     auto ev_ref = eig_cusolver(A0, n);
 
     T *dA = to_device(A0);
-    cuev::kernels::dbbr_reduce(&ws, dA);
-    cuev::kernels::bc_pack(&ws, dA, ws.B, n, nbw);
-    cuev::kernels::bc_chase(&ws, ws.B, ws.d, ws.e, ws.U, n, nbw);
+    cuev::kernels::dbbr_reduce(&ws, dA, ws.B);
+    cuev::kernels::bc_chase(&ws, ws.B, ws.d, ws.e);
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
     std::vector<T> d(n), e(n);

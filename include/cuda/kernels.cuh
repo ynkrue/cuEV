@@ -27,19 +27,36 @@ namespace cuev {
 // =============================================================================
 namespace kernels {
 
-// --- DBBR (double-blocking band reduction) ------------------------------------
+// -----------------------------------------------------------------------------
+// DBBR (double-blocking band reduction)
+// -----------------------------------------------------------------------------
+/**
+ * @brief Repack a band matrix into contiguous symmetric storage.
+ *
+ * Reads the lower band from full n×n storage into a packed band with
+ * leading dim 2b: B[(i−j) + j·2b] = A[i,j], j ≤ i ≤ j+b. Rows b+1..2b-1
+ * are zeroed to hold the transient bulge during bc_chase.
+ *
+ * @tparam T      float or double
+ * @param[in]     ws    solver handle (stream)
+ * @param[in]     A     n×n band matrix (lower band read)
+ * @param[out]    B     packed band buffer, 2b×n column-major
+ * @param[in]     n     matrix dimension
+ * @param[in]     b     bandwidth
+ */
+template <typename T> void dbbr_pack(SolverHandle<T> *ws, const T *A, T *B, int n, int b);
 
 /**
  * @brief Panel QR + block reflector for one DBBR panel.
  *
  * Runs geqrf on the panel and extracts the explicit unit-trapezoidal reflectors
- * into Y, and forms the b×b block factor T into ws->Tmat. The Householder
+ * into Y, and forms the b×b block factor T into ws->Tri. The Householder
  * scalars τ are staged in ws->tau.
  *      H₀·H₁···Hₖ  =  I − Y·T·Yᵀ    with Y = [v₀, v₁, …, vₖ]
  *                                   and T = upper-triangular correction.
  *
  * @tparam T      float or double
- * @param[in, out] ws   solver handle (cusolver, geqrf scratch, tau, Tmat)
+ * @param[in, out] ws   solver handle (cusolver, geqrf scratch, tau, Tri)
  * @param[in,out] A     rows × b panel into the working matrix upper triangle ← R,
  *                      strictly-lower ← packed Householder vectors
  * @param[out]    Y     rows × b reflectors (panel of ws->Y)
@@ -57,44 +74,13 @@ template <typename T> void dbbr_panel_qr(SolverHandle<T> *ws, T *A, T *Y, int ro
  * @tparam T      float or double
  * @param[in]     ws    solver handle
  * @param[in,out] A     n×n symmetric (lower), column-major, lda = ws->n; → band on exit
- */
-template <typename T> void dbbr_reduce(SolverHandle<T> *ws, T *A);
-
-/**
- * @brief Custom square-blocked symmetric rank-2k update: A ← A − Z·Yᵀ − Y·Zᵀ
- *
- * Replaces cuBLAS dsyr2k with a square tiling order that keeps GEMM shapes
- * more square on GPUsH100, significantly outperforming cuBLAS for large n.
- *
- * @tparam T      float or double
- * @param[in]     ws    solver handle
- * @param[in,out] A     n×n symmetric matrix, column-major; lower triangle updated
- * @param[in]     Z     n×k matrix, column-major
- * @param[in]     Y     n×k matrix, column-major
- * @param[in]     n     matrix dimension
- * @param[in]     k     number of columns in Z and Y
- */
-template <typename T>
-void dbbr_syr2k(SolverHandle<T> *ws, T *A, const T *Z, const T *Y, int n, int k);
-
-// --- BC (bulge chasing) -------------------------------------------------------
-
-/**
- * @brief Repack a band matrix into contiguous symmetric storage.
- *
- * Reads the lower band from full n×n storage (DBBR output in A's lower triangle)
- * into a packed band with leading dim 2b: B[(i−j) + j·2b] = A[i,j], j ≤ i ≤ j+b.
- * Rows b+1..2b-1 are zeroed to hold the transient bulge during bc_chase.
- *
- * @tparam T      float or double
- * @param[in]     ws    solver handle (stream)
- * @param[in]     A     n×n band matrix (lower band read)
  * @param[out]    B     packed band buffer, 2b×n column-major
- * @param[in]     n     matrix dimension
- * @param[in]     b     bandwidth
  */
-template <typename T> void bc_pack(SolverHandle<T> *ws, const T *A, T *B, int n, int b);
+template <typename T> void dbbr_reduce(SolverHandle<T> *ws, T *A, T *B);
 
+// -----------------------------------------------------------------------------
+// BC (bulge chasing)
+// -----------------------------------------------------------------------------
 /**
  * @brief GPU bulge chasing: band → tridiagonal (d, e).
  *
@@ -108,52 +94,70 @@ template <typename T> void bc_pack(SolverHandle<T> *ws, const T *A, T *B, int n,
  * @param[in,out] B     packed band matrix
  * @param[out]    d     diagonal of tridiagonal, length n
  * @param[out]    e     sub-diagonal of tridiagonal, length n−1
- * @param[in]     U     reserved for BC-Back reflectors
- * @param[in]     n     matrix dimension
- * @param[in]     b     bandwidth
  */
-template <typename T> void bc_chase(SolverHandle<T> *ws, T *B, T *d, T *e, T *U, int n, int b);
+template <typename T> void bc_chase(SolverHandle<T> *ws, T *B, T *d, T *e);
 
-// --- BT (back-transform) -----------------------------------------------------
-
+// -----------------------------------------------------------------------------
+// DC (divide-and-conquer tridiagonal eigensolver)
+// -----------------------------------------------------------------------------
 /**
- * @brief SBR-Back: apply accumulated WY reflectors to Q. Q ← (I − W·Yᵀ)·Q
+ * @brief Tridiagonal divide-and-conquer eigensolve on the CPU (LAPACK *stedc).
  *
- * Recursive WY strategy: combines b-wide W blocks into larger k-wide blocks
- * (k ≫ b) to get square GEMMs, then applies via ormqr-style update.
+ * TODO
  *
  * @tparam T      float or double
- * @param[in]     ws    solver handle
- * @param[in,out] Q     n×n orthogonal matrix, column-major; updated in place
- * @param[in]     W     SBR W-blocks, n×(n/b · b) column-major
- * @param[in]     Y     SBR Y-blocks, n×(n/b · b) column-major
- * @param[in]     n     matrix dimension
- * @param[in]     b     bandwidth used in DBBR
- * @param[in]     k     outer panel size used in DBBR
+ * @param[in]     ws    solver handle (provides n)
+ * @param[in,out] d     diagonal
+ * @param[in,out] e     sub-diagonal
+ * @param[out]    eval  eigenvalues
+ * @param[out]    evec  eigenvectorsp
+ */
+template <typename T> void tridi_dc(SolverHandle<T> *ws, T *d, T *e, T *eval, T *evec);
+
+// -----------------------------------------------------------------------------
+// BT (back-transform)
+// -----------------------------------------------------------------------------
+/**
+ * @brief Apply the two-stage back-transform: evec ← Q_s · Q_b · Q_d.
+ *
+ * Uses ws->M (ldu×n padded) as working buffer:
+ *   1. M ← Q_d          (evec copied in with zero padding for the bc_back kernel)
+ *   2. BC-Back:  M ← Q_b · M   (fast sliding-window kernel; requires ldu-padded layout)
+ *   3. SBR-Back: M ← Q_s · M   (WY block reflectors applied panel by panel, using ws->Z)
+ *   4. evec ← M[:n,:]   (strip padding)
+ *
+ * @tparam T      float or double
+ * @param[in]     ws    solver handle (stream, nbw, ldu; scratch Z and M)
+ * @param[in]     Y     DBBR Householder reflectors, n×n column-major (ld=n)
+ * @param[in]     W     SBR-Back companion W = Y·T, n×n column-major (ld=n)
+ * @param[in]     U     BC Householder reflectors, ldu×n column-major (ld=ldu)
+ * @param[in,out] evec  in: tridiagonal eigenvectors Q_d (n×n, ld=n);
+ *                      out: full eigenvectors Q_s·Q_b·Q_d
+ * @param[out]    timer optional; if non-null, records the per-phase BT breakdown
  */
 template <typename T>
-void bt_sbr_back(SolverHandle<T> *ws, T *Q, const T *W, const T *Y, int n, int b, int k);
+void back_transform(SolverHandle<T> *ws, const T *Y, const T *W, const T *U, T *evec,
+                    SolveTimer *timer = nullptr);
 
 /**
- * @brief BC-Back: apply BC Householder vectors U to Q. Q ← Q_b · Q
- *
- * BLAS2 kernel: applies each u-vector directly. uGroups staged in shared
- * memory; columns of Q kept in registers; transposed-u layout avoids bank conflicts.
- *
- * @tparam T      float or double
- * @param[in]     ws    solver handle (stream)
- * @param[in,out] Q     n×n matrix (from SBR-Back), column-major
- * @param[in]     U     BC Householder vectors from bc_chase, n×(n−2) column-major
- * @param[in]     n     matrix dimension
- * @param[in]     b     bandwidth
+ * @brief BC-Back factor application: M ← Q_b · M (exposed for stage testing).
+ * @param[in]     U   BC reflectors, ldu×n column-major
+ * @param[in,out] M   padded working buffer ws->M, ldu×n (padding rows below n must be zero)
  */
-template <typename T> void bt_bc_back(SolverHandle<T> *ws, T *Q, const T *U, int n, int b);
+template <typename T> void bc_back(SolverHandle<T> *ws, const T *U, T *M);
+
+/**
+ * @brief SBR-Back factor application: M ← Q_s · M (exposed for stage testing).
+ * @param[in]     Y   DBBR reflectors, n×n column-major (ld=n)
+ * @param[in]     W   SBR-Back companion W = Y·T, n×n column-major (ld=n)
+ * @param[in,out] M   n×n working buffer (ld=ws->ldu)
+ */
+template <typename T> void sbr_back(SolverHandle<T> *ws, const T *Y, const T *W, T *M);
 
 } // namespace kernels
 
 // =============================================================================
 // cuBLAS dispatching wrappers  (cuev::cublas)
-// All functions take SolverHandle<T>* and use ws->cublas internally.
 // =============================================================================
 namespace cublas {
 
@@ -182,30 +186,6 @@ template <typename T>
 void gemm(SolverHandle<T> *ws, cublasOperation_t transa, cublasOperation_t transb, int m, int n,
           int k, const T *alpha, const T *A, int lda, const T *B, int ldb, const T *beta, T *C,
           int ldc);
-
-/**
- * @brief General matrix addition: C ← α·op(A) + β·op(B)
- *
- * op(X) = X or Xᵀ depending on the value of transX.  C, A, B are column-major.
- *
- * @tparam T       float or double
- * @param[in] ws       solver handle
- * @param[in] transa   how to interpret A (op(A))
- * @param[in] transb   how to interpret B (op(B))
- * @param[in] m        rows of op(A), op(B), and C
- * @param[in] n        columns of op(A), op(B), and C
- * @param[in] alpha    scalar multiplier for op(A)
- * @param[in] A        matrix A, column-major, leading dimension lda
- * @param[in] lda      leading dimension of A (≥ rows of A)
- * @param[in] beta     scalar multiplier for op(B)
- * @param[in] B        matrix B, column-major, leading dimension ldb
- * @param[in] ldb      leading dimension of B (≥ rows of B)
- * @param[in,out] C    matrix C, column-major, leading dimension ldc; overwritten with the result
- * @param[in] ldc      leading dimension of C (≥ rows of C)
- */
-template <typename T>
-void geam(SolverHandle<T> *ws, cublasOperation_t transa, cublasOperation_t transb, int m, int n,
-          const T *alpha, const T *A, int lda, const T *beta, const T *B, int ldb, T *C, int ldc);
 
 /**
  * @brief Symmetric matrix-matrix multiplication: C ← α·A·B + β·C (or B·A if side=right)
@@ -278,70 +258,10 @@ template <typename T>
 void syr2k(SolverHandle<T> *ws, cublasFillMode_t uplo, cublasOperation_t trans, int n, int k,
            const T *alpha, const T *A, int lda, const T *B, int ldb, const T *beta, T *C, int ldc);
 
-/**
- * @brief Triangular solve: B ← α·op(A)⁻¹·B  (or B ← α·B·op(A)⁻¹ if side = right)
- *
- * @tparam T       float or double
- * @param[in] ws        solver handle
- * @param[in] side      whether A multiplies B from the left or right
- * @param[in] uplo      which triangle of A is referenced
- * @param[in] trans     how to interpret A (op(A))
- * @param[in] diag      whether A has a unit diagonal
- * @param[in] m         rows of B
- * @param[in] n         columns of B
- * @param[in] alpha     scalar multiplier for the solution
- * @param[in] A         triangular matrix A, column-major, leading dimension lda
- * @param[in] lda       leading dimension of A (≥ rows of A)
- * @param[in,out] B     matrix B, column-major, leading dimension ldb; overwritten with the solution
- * @param[in] ldb       leading dimension of B (≥ rows of B)
- */
-template <typename T>
-void trsm(SolverHandle<T> *ws, cublasSideMode_t side, cublasFillMode_t uplo,
-          cublasOperation_t trans, cublasDiagType_t diag, int m, int n, const T *alpha, const T *A,
-          int lda, T *B, int ldb);
-
-/**
- * @brief Vector scaling: x ← α·x
- *
- * @tparam T       float or double
- * @param[in] ws        solver handle
- * @param[in] n         length of x
- * @param[in] alpha     scalar multiplier for x
- * @param[in,out] x     vector x; overwritten with the result
- * @param[in] incx      stride of x (≥ 1)
- */
-template <typename T> void scal(SolverHandle<T> *ws, int n, const T *alpha, T *x, int incx);
-
-/**
- * @brief Vector copy: y ← x
- *
- * @tparam T       float or double
- * @param[in] ws        solver handle
- * @param[in] n         length of x and y
- * @param[in] x         vector x; not modified
- * @param[in] incx      stride of x (≥ 1)
- * @param[in,out] y     vector y; overwritten with the result
- * @param[in] incy      stride of y (≥ 1)
- */
-template <typename T> void copy(SolverHandle<T> *ws, int n, const T *x, int incx, T *y, int incy);
-
-/**
- * @brief Vector 2-norm: result = ‖x‖₂
- *
- * @tparam T       float or double
- * @param[in] ws        solver handle
- * @param[in] n         length of x
- * @param[in] x         vector x
- * @param[in] incx      stride of x (≥ 1)
- * @param[out] result   pointer to the result on the device
- */
-template <typename T> void nrm2(SolverHandle<T> *ws, int n, const T *x, int incx, T *result);
-
 } // namespace cublas
 
 // =============================================================================
 // cuSOLVER type-dispatching wrappers  (cuev::cusolver)
-// All functions take SolverHandle<T>* and extract handles/scratch internally.
 // =============================================================================
 namespace cusolver {
 
@@ -359,40 +279,6 @@ namespace cusolver {
  */
 template <typename T>
 void geqrf(SolverHandle<T> *ws, int m, int n, T *A, int lda, T *tau, cudaStream_t stream);
-
-/**
- * @brief Materialise Q from compact QR representation: A ← first n columns of Q.
- *
- * @tparam T         float or double
- * @param[in]     ws      solver handle (cusolver, orgqr_buf, d_info)
- * @param[in]     m       rows of Q
- * @param[in]     n       columns to generate (≤ m)
- * @param[in]     k       Householder reflector count (= min(m,n) from geqrf)
- * @param[in,out] A       m×n, column-major; compact QR in → first n cols of Q out
- * @param[in]     lda     leading dimension
- * @param[in]     tau     Householder scalars from geqrf, length k
- * @param[in]     stream  CUDA stream
- */
-template <typename T>
-void orgqr(SolverHandle<T> *ws, int m, int n, int k, T *A, int lda, const T *tau,
-           cudaStream_t stream);
-
-/**
- * @brief Symmetric dense eigensolver (D&C): A v = λ v.
- *
- * A is overwritten with eigenvectors (columns, ascending eigenvalue order).
- * W receives eigenvalues in ascending order.
- *
- * @tparam T         float or double
- * @param[in]     ws      solver handle (cusolver, syevd_buf, d_info)
- * @param[in]     n       matrix dimension
- * @param[in,out] A       n×n symmetric, column-major; overwritten with eigenvectors
- * @param[in]     lda     leading dimension
- * @param[out]    W       eigenvalues ascending, length n
- * @param[in]     stream  CUDA stream
- */
-template <typename T>
-void syevd(SolverHandle<T> *ws, int n, T *A, int lda, T *W, cudaStream_t stream);
 
 } // namespace cusolver
 

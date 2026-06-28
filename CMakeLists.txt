@@ -16,17 +16,19 @@ endif()
 # =============================================================================
 # Options
 # =============================================================================
-option(CUEV_ENABLE_MP    "Build distributed multi-GPU solver" OFF)
-option(CUEV_ENABLE_TESTS "Build tests"                        ON)
-option(CUEV_ENABLE_BENCH "Build benchmarks"                   ON)
-option(CUEV_BUILD_DOCS   "Build Doxygen documentation"        OFF)
+option(CUEV_ENABLE_MPI    "Build distributed multi-GPU solver" OFF)
+option(CUEV_ENABLE_OMP    "Multithreaded BLAS/LAPACK"          OFF)
+option(CUEV_ENABLE_TESTS  "Build tests"                         ON)
+option(CUEV_ENABLE_BENCH  "Build benchmarks"                    ON)
+option(CUEV_BUILD_DOCS    "Build Doxygen documentation"        OFF)
 
 # =============================================================================
 # Dependencies
 # =============================================================================
 find_package(CUDAToolkit REQUIRED)
+find_package(LAPACK REQUIRED)
 
-if(CUEV_ENABLE_MP)
+if(CUEV_ENABLE_MPI)
   find_package(MPI REQUIRED)
 
   # nvhpc libraries - set NCCL_ROOT / CUBLASMP_ROOT / CUSOLVERMP_ROOT
@@ -53,18 +55,19 @@ endif()
 # =============================================================================
 # cuev — single-GPU library
 # =============================================================================
-if(NOT CUEV_ENABLE_MP)
+if(NOT CUEV_ENABLE_MPI)
   add_library(cuev SHARED
     src/cuda/handle.cu
     src/cuda/cublas.cu
     src/cuda/cusolver.cu
     src/cuda/dbbr.cu
     src/cuda/bulge.cu
-    # src/cuda/backtransform.cu
+    src/cuda/tridi.cu
+    src/cuda/backtransform.cu
     src/cuda/solver.cu
   )
   target_include_directories(cuev PUBLIC include)
-  target_link_libraries(cuev PUBLIC CUDA::cublas CUDA::cusolver)
+  target_link_libraries(cuev PUBLIC CUDA::cublas CUDA::cusolver LAPACK::LAPACK)
   set_target_properties(cuev PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     POSITION_INDEPENDENT_CODE  ON)
@@ -73,7 +76,7 @@ endif()
 # =============================================================================
 # cuev_mp — distributed library
 # =============================================================================
-if(CUEV_ENABLE_MP)
+if(CUEV_ENABLE_MPI)
   add_library(cuev_mp SHARED
     src/mp/handle_mp.cu
     src/mp/cublas_mp.cu
@@ -84,7 +87,7 @@ if(CUEV_ENABLE_MP)
     src/mp/solver_mp.cu
   )
   target_include_directories(cuev_mp PUBLIC include)
-  target_compile_definitions(cuev_mp PUBLIC CUEV_ENABLE_MP)
+  target_compile_definitions(cuev_mp PUBLIC CUEV_ENABLE_MPI)
   target_link_libraries(cuev_mp PUBLIC
     CUDA::cublas CUDA::cusolver
     MPI::MPI_CXX NCCL::NCCL
@@ -98,18 +101,16 @@ endif()
 # Benchmarks
 # =============================================================================
 if(CUEV_ENABLE_BENCH)
-  if(NOT CUEV_ENABLE_MP)
+  if(NOT CUEV_ENABLE_MPI)
     add_executable(cuBench bench/bench.cpp)
     target_link_libraries(cuBench PRIVATE cuev CUDA::cudart CUDA::cublas CUDA::cusolver)
-    add_executable(cuBenchDbbr bench/bench_dbbr.cpp)
-    target_link_libraries(cuBenchDbbr PRIVATE cuev CUDA::cudart CUDA::cublas CUDA::cusolver)
-    add_executable(cuBenchEvd bench/bench_evd.cpp)
-    target_link_libraries(cuBenchEvd PRIVATE cuev CUDA::cudart CUDA::cublas CUDA::cusolver)
-  else()
-    add_executable(cuBenchMp   bench/bench_mp.cpp)
-    target_link_libraries(cuBenchMp   PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
-    add_executable(cuBenchCuev bench/bench_cuev.cpp)
-    target_link_libraries(cuBenchCuev PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
+    add_executable(cuBenchSolver bench/bench_solver.cpp)
+    target_link_libraries(cuBenchSolver PRIVATE cuev CUDA::cudart CUDA::cublas CUDA::cusolver)
+  # else()
+  #   add_executable(cuBenchMp   bench/bench_mp.cpp)
+  #   target_link_libraries(cuBenchMp   PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
+  #   add_executable(cuBenchCuev bench/bench_cuev.cpp)
+  #   target_link_libraries(cuBenchCuev PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
   endif()
 endif()
 
@@ -117,19 +118,20 @@ endif()
 # Tests
 # =============================================================================
 if(CUEV_ENABLE_TESTS)
-  if(NOT CUEV_ENABLE_MP)
+  if(NOT CUEV_ENABLE_MPI)
     add_executable(cuTest
       test/cuda/test_dbbr.cu
       test/cuda/test_bulge.cu
+      test/cuda/test_backtransform.cu
     )
     target_link_libraries(cuTest PRIVATE cuev CUDA::cudart CUDA::cublas CUDA::cusolver)
     set_target_properties(cuTest PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-  else()
-    add_executable(cuTestMp
-      test/mp/test_mp.cpp
-    )
-    target_link_libraries(cuTestMp PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
-    set_target_properties(cuTestMp PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+  # else()
+  #   add_executable(cuTestMp
+  #     test/mp/test_mp.cpp
+  #   )
+  #   target_link_libraries(cuTestMp PRIVATE cuev_mp CUDA::cudart MPI::MPI_CXX)
+  #   set_target_properties(cuTestMp PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
   endif()
 endif()
 
