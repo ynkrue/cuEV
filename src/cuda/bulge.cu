@@ -26,20 +26,31 @@ namespace {
 
 /// Largest supported bandwidth.
 constexpr int BC_MAX_B = 64;
-/// Threads per sweep-block
-constexpr int BC_THREADS = 512;
+/// Threads per sweep-block (sized to the ~3b-wide per-hop window, not the band)
+constexpr int BC_THREADS = 128;
+/// Warps per block
+constexpr int BC_NWARPS = BC_THREADS / 32;
 
-/// Block-wide all-reduce sum, red is BC_THREADS scratch.
+/// Block-wide all-reduce sum via warp shuffles + one cross-warp pass (red holds BC_NWARPS
+/// partials).
 template <typename T> __device__ __forceinline__ T block_sum(T v, T *red) {
-    red[threadIdx.x] = v;
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1)
+        v += __shfl_down_sync(0xffffffffu, v, o);
+    if (lane == 0) red[warp] = v;
     __syncthreads();
-    for (int s = BC_THREADS / 2; s > 0; s >>= 1) {
-        if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s];
-        __syncthreads();
+    T r = (threadIdx.x < BC_NWARPS) ? red[threadIdx.x] : T(0);
+    if (warp == 0) {
+#pragma unroll
+        for (int o = BC_NWARPS / 2; o > 0; o >>= 1)
+            r += __shfl_down_sync(0xffffffffu, r, o);
+        if (lane == 0) red[0] = r;
     }
-    T r = red[0];
     __syncthreads();
-    return r;
+    const T result = red[0];
+    __syncthreads();
+    return result;
 }
 
 /**

@@ -167,7 +167,7 @@ static void run_suite(cusolverDnHandle_t cusolver, int n, int warmup, int iters,
 }
 
 int main(int argc, char **argv) {
-    int n = 4096, warmup = 3, iters = 10;
+    int n = 4096, warmup = 1, iters = 3;
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--n") && i + 1 < argc) n = atoi(argv[++i]);
         if (!strcmp(argv[i], "--warmup") && i + 1 < argc) warmup = atoi(argv[++i]);

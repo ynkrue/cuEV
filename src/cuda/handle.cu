@@ -18,7 +18,7 @@ template <typename T> SolverHandle<T> handle_alloc(int n, int nbw, int nk, cudaS
     ws.n = n;
     ws.nbw = nbw;
     ws.nk = nk;
-    ws.ldu = n + 512; // padded for efficient back-transform kernels
+    ws.ldu = ((n + 512 + 3) / 4) * 4; // pad + round to 4 for aligned double4/float4 in bc_back
     ws.stream = stream;
 
     CUBLAS_CHECK(cublasCreate(&ws.cublas));

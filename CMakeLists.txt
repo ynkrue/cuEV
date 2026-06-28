@@ -26,8 +26,23 @@ option(CUEV_BUILD_DOCS    "Build Doxygen documentation"        OFF)
 # Dependencies
 # =============================================================================
 find_package(CUDAToolkit REQUIRED)
-find_package(LAPACK REQUIRED)
-
+# use multithreaded BLAS/LAPACK
+add_library(cuev_lapack INTERFACE)
+if(CUEV_ENABLE_OMP)
+  set(MKL_INTERFACE lp64)
+  set(MKL_THREADING gnu_thread)
+  find_package(MKL CONFIG)
+endif()
+if(MKL_FOUND)
+  message(STATUS "cuev_lapack: GNU-OpenMP threaded MKL")
+  target_link_libraries(cuev_lapack INTERFACE MKL::MKL)
+else()
+  if(CUEV_ENABLE_OMP)
+    message(WARNING "CUEV_ENABLE_OMP set but MKL not found; falling back to plain LAPACK")
+  endif()
+  find_package(LAPACK REQUIRED)
+  target_link_libraries(cuev_lapack INTERFACE LAPACK::LAPACK)
+endif()
 if(CUEV_ENABLE_MPI)
   find_package(MPI REQUIRED)
 
@@ -67,7 +82,7 @@ if(NOT CUEV_ENABLE_MPI)
     src/cuda/solver.cu
   )
   target_include_directories(cuev PUBLIC include)
-  target_link_libraries(cuev PUBLIC CUDA::cublas CUDA::cusolver LAPACK::LAPACK)
+  target_link_libraries(cuev PUBLIC CUDA::cublas CUDA::cusolver cuev_lapack)
   set_target_properties(cuev PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     POSITION_INDEPENDENT_CODE  ON)

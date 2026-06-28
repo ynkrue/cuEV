@@ -31,8 +31,8 @@ cuev::symm_eig_solve<T>(T *A, int n, T *eval, T *evec, cudaStream_t stream);
 * **Mechanism**: Tridiagonal eigensolve on the **CPU** via LAPACK `dstedc` (MKL). cuSOLVER exposes no standalone tridiagonal D&C (only dense `syevd`, which re-tridiagonalizes), so it is unusable here; running on the CPU also frees the GPU for the back-transform (stage 5).
 
 ### 5. Back-Transformation
-* **Mechanism**: Reordered workflow $Q = (Q_s \cdot Q_b) \cdot Q_d$.
-* **Strategy**: Run CPU D&C concurrently with the GPU forming $Q_s \cdot Q_b$ (both depend only on the tridiagonal/reflectors, not each other), then one GEMM $\cdot Q_d$. Correctness first uses the simple order $Q_s \cdot (Q_b \cdot Q_d)$ synchronously; the async reorder is the performance layer.
+* **Mechanism**: Direct workflow $Q = Q_s \cdot (Q_b \cdot Q_d)$, applied to $Q_d$ in place.
+* **Strategy**: `bc_back` applies $Q_b$ (the bulge-chasing reflectors) to $Q_d$ with a register-resident sliding-window kernel — the reflectors compose to $Q_b^\top$ in forward order, so they are applied in reverse (upward slide) to get $Q_b$. Then `sbr_back` applies $Q_s$ via WY-block GEMMs $(I - W Y^\top)$ per panel. The SC'25 **reordered** scheme (build $Q_s \cdot Q_b$ while CPU D&C runs, then one GEMM $\cdot Q_d$) is a deferred performance layer; the current implementation is synchronous.
 
 
 References: Wang et al., "Improving Tridiagonalization Performance on GPU Architectures"
@@ -79,10 +79,13 @@ cmake -B build -DCUEV_ENABLE_MP=ON             # distributed (multi-GPU)
 ### Stage status (Phase 1)
 
 - [x] **1 DBBR** (full → band) — complete, tested (eigenvalues vs cuSOLVER), benchmarked
-- [ ] **2 Data repacking** (`bc_pack`) — stub
-- [ ] **3 Bulge chasing** (`bc_chase`) — stub
-- [ ] **4 D&C** (LAPACK `dstedc`, MKL) — not started
-- [ ] **5 Back-transform** (`bt_sbr_back`, `bt_bc_back`) — stub
+- [x] **2 Data repacking** (`bc_pack` / `dbbr_pack`) — complete
+- [x] **3 Bulge chasing** (`bc_chase`) — complete, tested (spectrum vs cuSOLVER)
+- [x] **4 D&C** (LAPACK `*stedc`, MKL) — functional on CPU; dominates wall time at large n, to be optimized
+- [x] **5 Back-transform** (`bc_back` + `sbr_back`) — complete, tested (full residual + stage isolation)
+
+The full solve is correct end-to-end (n=16000 fp64: relative residual ~2e-14, eigenvectors ~7e-14
+vs cuSOLVER). GPU stages are competitive; CPU `*stedc` is the remaining wall-time bottleneck.
 
 DBBR on A100 80GB (fp64, b=64, k=512): ~9.9 TFLOP/s at n=32k (~1.15× over single-blocked SBR;
 the bigger DBBR win is a ≥49k phenomenon). Profile levers for later: per-block square companion

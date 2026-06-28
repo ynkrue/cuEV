@@ -1,13 +1,13 @@
 /**
  * @file   bench_solver.cpp
- * @brief  Full-solver benchmark: cuev::symm_eig_solve (eigenvalues + eigenvectors) vs cuSOLVER.
+ * @brief  Full-solver benchmark: cuev::symm_eig_solve vs cuSOLVER.
  *
  * Runs the whole pipeline (DBBR → bulge chasing → CPU D&C → back-transform) via
  * cuev::symm_eig_solve and validates the eigenpairs directly:
  *   - residual       max ‖A·V − V·Λ‖_F / ‖A‖_F
  *   - orthogonality  ‖Vᵀ·V − I‖_F
  *   - spectrum       max |λ − λ_cusolver|
- * Timed against cuSOLVER's vector-mode syevd (the apples-to-apples full EVD).
+ * Timed against cuSOLVER's syevd.
  *
  * Usage: cuBenchSolver [--n N]
  *
@@ -108,8 +108,7 @@ static void Xcopy(cublasHandle_t h, int n, const T *x, int incx, T *y, int incy)
         cublasDcopy(h, n, x, incx, y, incy);
 }
 
-// Validate (eval, evec) against the original symmetric A (all device, column-major).
-// s1, s2 are n×n scratch; ddiag is length-n scratch.
+// Validate (eval, evec) against the original symmetric A
 template <typename T>
 static void check_solution(cublasHandle_t cb, const T *dA, const T *d_eval, const T *d_evec, int n,
                            T *s1, T *s2, T *ddiag, double &rel_res, double &orth) {
@@ -131,9 +130,7 @@ static void check_solution(cublasHandle_t cb, const T *dA, const T *d_eval, cons
     orth = std::sqrt(std::max(0.0, gnorm * gnorm - 2.0 * tr + (double)n));
 }
 
-// cuSOLVER full EVD (eigenvalues + eigenvectors), 64-bit Xsyevd. Returns eigenvalues and time;
-// if d_evec_out != nullptr the eigenvectors are copied there (n×n column-major). ms = -1 and
-// empty vector if unsupported at this n (int32 limit ~46340).
+// cuSOLVER full EVD, 64-bit Xsyevd. Returns eigenvalues and time
 template <typename T>
 static std::vector<double> cusolver_evd(cusolverDnHandle_t h, const std::vector<T> &hA, int n,
                                         cudaStream_t stream, float &ms, T *d_evec_out = nullptr) {

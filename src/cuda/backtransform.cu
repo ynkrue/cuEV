@@ -31,9 +31,18 @@ namespace {
 
 constexpr int BT_PER_THREAD = 8;           // M elements per thread (window = 32·8 = 256 rows)
 constexpr int BT_WIN = BT_PER_THREAD * 32; // 256 — register-resident window height
-constexpr int BT_WARPS = 8;                // warps per block
+constexpr int BT_WARPS = 12;               // warps per block
 constexpr int BT_RED = 32 / BT_PER_THREAD; // 4 — a b=32 reflector spans 4 threads
-constexpr int BT_UTILE = 32;               // reflectors staged in shared per pass
+constexpr int BT_UTILE = 64;               // reflectors staged in shared per pass
+
+/// 4-wide vector type for 128-bit (float4) / 256-bit (double4) coalesced M loads/stores.
+template <typename T> struct Vec4;
+template <> struct Vec4<float> {
+    using type = float4;
+};
+template <> struct Vec4<double> {
+    using type = double4;
+};
 
 /// Partial reduction over the BT_RED threads that span one reflector.
 template <typename T> __device__ __forceinline__ T bt_reduce(T v) {
@@ -93,22 +102,32 @@ __global__ void bc_back_kernel(int n, int cols, int extra, int nsweeps, int last
             const long uOff = (long)p * BT_UTILE;
             const int remU = remU0 - p * BT_UTILE; // valid reflectors in this tile (h ≥ remU ⇒ 0)
             __syncthreads();
-            // stage up to BT_UTILE reflectors of this pass into shared (zero-filled beyond remU)
-            for (int k = warp; k < BT_UTILE; k += BT_WARPS)
-                for (int t = 0; t < BT_PER_THREAD; t++) {
-                    sU[k * BT_WIN + lane + t * 32] = T(0);
-                    if (k < remU)
+            // stage up to BT_UTILE reflectors of this pass into shared (one write each; tiles
+            // beyond remU — only the last pass — are zero so they act as identity reflectors)
+            for (int k = warp; k < BT_UTILE; k += BT_WARPS) {
+                if (k < remU) {
+#pragma unroll
+                    for (int t = 0; t < BT_PER_THREAD; t++)
                         sU[k * BT_WIN + lane + t * 32] =
                             U[(uOff + k) * ldu + baseRow + 1 + k + lane * BT_PER_THREAD + t];
+                } else {
+#pragma unroll
+                    for (int t = 0; t < BT_PER_THREAD; t++)
+                        sU[k * BT_WIN + lane + t * 32] = T(0);
                 }
+            }
             __syncthreads();
 
+            using V = typename Vec4<T>::type; // 128/256-bit coalesced window transfers
+            V *rMv = reinterpret_cast<V *>(rM);
             for (int col = warp; col < cols; col += BT_WARPS) {
                 T *Mc = M + (long)col * ldm; // this column
                 // window = bottom BT_WIN rows of the span: [baseRow+BT_UTILE, +BT_WIN)
+                const V *win =
+                    reinterpret_cast<const V *>(Mc + baseRow + BT_UTILE + lane * BT_PER_THREAD);
 #pragma unroll
-                for (int t = 0; t < BT_PER_THREAD; t++)
-                    rM[t] = Mc[baseRow + BT_UTILE + lane * BT_PER_THREAD + t];
+                for (int t = 0; t < BT_PER_THREAD / 4; t++)
+                    rMv[t] = win[t];
                 // sHead = the BT_UTILE rows above the window: [baseRow, baseRow+BT_UTILE)
 #pragma unroll
                 for (int t = lane; t < BT_UTILE; t += 32)
@@ -117,14 +136,18 @@ __global__ void bc_back_kernel(int n, int cols, int extra, int nsweeps, int last
 
                 for (int h = BT_UTILE - 1; h >= 0; h--) {
                     // apply reflector h:  m ← m − 2·(wᵀm)·w  (unit-w convention, H = I − 2wwᵀ)
+                    T w[BT_PER_THREAD]; // cache the reflector once (used by dot + update)
+#pragma unroll
+                    for (int t = 0; t < BT_PER_THREAD; t++)
+                        w[t] = sU[h * BT_WIN + lane + t * 32];
                     T proj = T(0);
 #pragma unroll
                     for (int t = 0; t < BT_PER_THREAD; t++)
-                        proj += sU[h * BT_WIN + lane + t * 32] * rM[t];
+                        proj += w[t] * rM[t];
                     proj = bt_reduce(proj);
 #pragma unroll
                     for (int t = 0; t < BT_PER_THREAD; t++)
-                        rM[t] -= T(2) * proj * sU[h * BT_WIN + lane + t * 32];
+                        rM[t] -= T(2) * proj * w[t];
 
                     // slide window up one row: bottom row leaves, top enters from neighbor/sHead.
                     // register shuffle (no shared round-trip): lane gets lane−1's old bottom row.
@@ -139,9 +162,10 @@ __global__ void bc_back_kernel(int n, int cols, int extra, int nsweeps, int last
                 __syncwarp(); // sDone (written by lane 31) visible before the read-out below
 
                 // write back the slid-up window [baseRow, +BT_WIN) and the BT_UTILE rows that left
+                V *out = reinterpret_cast<V *>(Mc + baseRow + lane * BT_PER_THREAD);
 #pragma unroll
-                for (int t = 0; t < BT_PER_THREAD; t++)
-                    Mc[baseRow + lane * BT_PER_THREAD + t] = rM[t];
+                for (int t = 0; t < BT_PER_THREAD / 4; t++)
+                    out[t] = rMv[t];
 #pragma unroll
                 for (int t = lane; t < BT_UTILE; t += 32)
                     Mc[baseRow + BT_WIN + t] = sDone[warp * BT_UTILE + t];
