@@ -84,6 +84,9 @@ template <typename T> struct SolverHandle {
     T *e;      ///< tridiagonal off-diagonal
     int *prog; ///< progress flag for BC
 
+    // D&C buffer
+    T *Sdc; ///< n*n - device rank-1 eigenvector matrix S (per merge, GEMM'd into evec)
+
     // back-transform buffers
     T *M; ///< ldu*n - back-transform working buffer (padded for bc_back kernel)
 

@@ -86,6 +86,13 @@ if(NOT CUEV_ENABLE_MPI)
   set_target_properties(cuev PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     POSITION_INDEPENDENT_CODE  ON)
+  # OpenMP for the host-side D&C merge loops (secular roots / eigenvector recon).
+  find_package(OpenMP)
+  if(OpenMP_CXX_FOUND)
+    target_link_libraries(cuev PUBLIC OpenMP::OpenMP_CXX)
+    target_compile_options(cuev PRIVATE
+      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=${OpenMP_CXX_FLAGS}>)
+  endif()
 endif()
 
 # =============================================================================
@@ -138,6 +145,7 @@ if(CUEV_ENABLE_TESTS)
       test/cuda/test_dbbr.cu
       test/cuda/test_bulge.cu
       test/cuda/test_backtransform.cu
+      test/cuda/test_tridi.cu
     )
     target_link_libraries(cuTest PRIVATE cuev CUDA::cudart CUDA::cublas CUDA::cusolver)
     set_target_properties(cuTest PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
